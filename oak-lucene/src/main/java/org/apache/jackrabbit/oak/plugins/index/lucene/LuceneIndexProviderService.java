@@ -72,6 +72,8 @@ public class LuceneIndexProviderService {
 
     private Registration mbeanReg;
 
+    private Registration indexTermProviderReg;
+
     @Activate
     private void activate(BundleContext bundleContext, Map<String, ?> config)
             throws NotCompliantMBeanException {
@@ -88,6 +90,12 @@ public class LuceneIndexProviderService {
                 new LuceneIndexMBeanImpl(indexProvider.getTracker()),
                 LuceneIndexMBean.TYPE,
                 "Lucene Index statistics");
+
+        indexTermProviderReg = registerMBean(new OsgiWhiteboard(bundleContext),
+                LuceneIndexTermProvider.class,
+                new LuceneIndexTermProvider(indexProvider.getTracker()),
+                "Lucene Index",
+                "Lucene Index Terms Provider");
     }
 
     @Deactivate
@@ -98,6 +106,10 @@ public class LuceneIndexProviderService {
 
         if(mbeanReg != null){
             mbeanReg.unregister();
+        }
+
+        if (indexTermProviderReg != null) {
+            indexTermProviderReg.unregister();
         }
 
         if (indexProvider != null) {
