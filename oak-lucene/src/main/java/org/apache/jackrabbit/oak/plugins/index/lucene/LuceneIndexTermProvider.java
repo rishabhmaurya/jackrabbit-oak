@@ -57,7 +57,8 @@ public class LuceneIndexTermProvider implements IndexTermProvider {
     public List<IndexTerm> retrieveTerms(String indexPath, Set<String> allowedFields, int minFreq, int minTermLength)
             throws IOException {
 
-        IndexReader reader = indexTracker.acquireIndexNode("/").getSearcher().getIndexReader();
+        IndexNode indexNode = indexTracker.acquireIndexNode("/");
+        IndexReader reader = indexNode.getSearcher().getIndexReader();
 
         Map<String, Integer> termMap = new HashMap<String, Integer>();
 
@@ -86,12 +87,13 @@ public class LuceneIndexTermProvider implements IndexTermProvider {
         List<IndexTerm> suggestionTerms = new ArrayList<IndexTerm>();
 
         for (Map.Entry<String, Integer> entry : termMap.entrySet()) {
-            if (minFreq >= entry.getValue()) {
+            if (entry.getValue() >= minFreq ) {
                 suggestionTerms.add(new IndexTerm(entry.getKey(), entry.getValue()));
             }
         }
 
         log.info("Finished retrieving lucene index terms.");
+        indexNode.release();
         return suggestionTerms;
     }
 }
