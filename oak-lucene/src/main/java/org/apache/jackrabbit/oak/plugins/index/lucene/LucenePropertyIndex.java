@@ -41,6 +41,7 @@ import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.apache.jackrabbit.oak.plugins.index.aggregate.NodeAggregator;
 import org.apache.jackrabbit.oak.plugins.index.lucene.IndexDefinition.IndexingRule;
 import org.apache.jackrabbit.oak.plugins.index.lucene.IndexPlanner.PlanResult;
+import org.apache.jackrabbit.oak.plugins.index.lucene.score.ScorerProviderFactory;
 import org.apache.jackrabbit.oak.plugins.index.lucene.util.MoreLikeThisHelper;
 import org.apache.jackrabbit.oak.query.QueryEngineSettings;
 import org.apache.jackrabbit.oak.query.QueryImpl;
@@ -70,6 +71,7 @@ import org.apache.lucene.index.StoredFieldVisitor;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.index.Terms;
 import org.apache.lucene.index.TermsEnum;
+import org.apache.lucene.queries.CustomScoreQuery;
 import org.apache.lucene.queryparser.classic.ParseException;
 import org.apache.lucene.queryparser.classic.QueryParser;
 import org.apache.lucene.search.BooleanClause;
@@ -101,7 +103,6 @@ import static org.apache.jackrabbit.JcrConstants.JCR_PRIMARYTYPE;
 import static org.apache.jackrabbit.oak.api.Type.LONG;
 import static org.apache.jackrabbit.oak.api.Type.STRING;
 import static org.apache.jackrabbit.oak.commons.PathUtils.denotesRoot;
-import static org.apache.jackrabbit.oak.commons.PathUtils.getName;
 import static org.apache.jackrabbit.oak.commons.PathUtils.getParentPath;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.FieldNames.PATH;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.IndexDefinition.NATIVE_SORT_ORDER;
@@ -170,8 +171,16 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
 
     protected final IndexTracker tracker;
 
+    private final ScorerProviderFactory scorerProviderFactory;
+
     public LucenePropertyIndex(IndexTracker tracker) {
         this.tracker = tracker;
+        this.scorerProviderFactory = ScorerProviderFactory.DEFAULT;
+    }
+
+    public LucenePropertyIndex(IndexTracker tracker, ScorerProviderFactory factory) {
+        this.tracker = tracker;
+        this.scorerProviderFactory = factory;
     }
 
     @Override
@@ -301,6 +310,13 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
                 try {
                     IndexSearcher searcher = indexNode.getSearcher();
                     Query query = getQuery(plan, searcher.getIndexReader());
+
+                    CustomScoreQuery customScoreQuery = getCustomScoreQuery(plan, query);
+
+                    if (customScoreQuery != null) {
+                        query = customScoreQuery;
+                    }
+
                     TopDocs docs;
                     long time = System.currentTimeMillis();
                     if (lastDoc != null) {
@@ -514,6 +530,17 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
             bq.add(q, MUST);
         }
         return bq;
+    }
+
+    private CustomScoreQuery getCustomScoreQuery(IndexPlan plan, Query subQuery) {
+        PlanResult planResult = pr(plan);
+        IndexDefinition idxDef = planResult.indexDefinition;
+        String providerName = idxDef.getScorerProviderName();
+        if (scorerProviderFactory != null && providerName != null) {
+               return  scorerProviderFactory.getScorerProvider(providerName)
+                       .createCustomScoreQuery(subQuery);
+        }
+        return null;
     }
 
     private static void addNonFullTextConstraints(List<Query> qs,
