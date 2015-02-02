@@ -24,6 +24,97 @@
 # * new tests are typically be added on top, after the syntax docs
 # * use ascii character only
 
+# "or" problem
+xpath2sql /jcr:root/content//*[(@i = '1' or @i = '2') or (@t = 'a' or @t = 'b')]
+select [jcr:path], [jcr:score], *
+  from [nt:base] as a
+  where isdescendantnode(a, '/content')
+  and [i] in('1', '2')
+  union select [jcr:path], [jcr:score], *
+  from [nt:base] as a
+  where isdescendantnode(a, '/content')
+  and [t] in('a', 'b')
+  /* xpath ... */
+
+# "or" problem
+xpath2sql /jcr:root/content//*[((@i = '1' or @i = '2') or (@s = 'x')) and (@t = 'a' or @t = 'b')]
+select [jcr:path], [jcr:score], *
+  from [nt:base] as a
+  where isdescendantnode(a, '/content')
+  and [t] in('a', 'b')
+  and [i] in('1', '2')
+  union select [jcr:path], [jcr:score], *
+  from [nt:base] as a
+  where isdescendantnode(a, '/content')
+  and [t] in('a', 'b')
+  and [s] = 'x'
+  /* xpath ... */
+
+xpath2sql /jcr:root/content//*[((@i = '1' or @i = '2') or (@s = 'x')) and (@t = 'a')]
+select [jcr:path], [jcr:score], *
+  from [nt:base] as a
+  where isdescendantnode(a, '/content')
+  and [t] = 'a'
+  and [i] in('1', '2')
+  union select [jcr:path], [jcr:score], *
+  from [nt:base] as a
+  where isdescendantnode(a, '/content')
+  and [t] = 'a'
+  and [s] = 'x'
+  /* xpath ... */
+
+xpath2sql /jcr:root/content//*[((@i = '1' or @i = '2') or (@s = 'x'))]
+select [jcr:path], [jcr:score], *
+  from [nt:base] as a
+  where isdescendantnode(a, '/content')
+  and [i] in('1', '2')
+  union select [jcr:path], [jcr:score], *
+  from [nt:base] as a
+  where isdescendantnode(a, '/content')
+  and [s] = 'x'
+  /* xpath ... */
+
+# "or" with "order by" problem
+xpath2sql /jcr:root/content//*[((@i = '1' or @i = '2') or (@s = 'x')) and (@t = 'a' or @t = 'b')] order by @a
+select [jcr:path], [jcr:score], *
+  from [nt:base] as a
+  where isdescendantnode(a, '/content')
+  and [t] in('a', 'b')
+  and [i] in('1', '2')
+  union select [jcr:path], [jcr:score], *
+  from [nt:base] as a
+  where isdescendantnode(a, '/content')
+  and [t] in('a', 'b')
+  and [s] = 'x'
+  order by [a]
+  /* xpath ... */
+
+xpath2sql /jcr:root/content//*[((@i = '1' or @i = '2') or (@s = 'x')) and (@t = 'a')] order by @a
+select [jcr:path], [jcr:score], *
+  from [nt:base] as a
+  where isdescendantnode(a, '/content')
+  and [t] = 'a'
+  and [i] in('1', '2')
+  union select [jcr:path], [jcr:score], *
+  from [nt:base] as a
+  where isdescendantnode(a, '/content')
+  and [t] = 'a'
+  and [s] = 'x'
+  order by [a]
+  /* xpath ... */
+
+xpath2sql /jcr:root/content//*[((@i = '1' or @i = '2') or (@s = 'x'))] order by @a
+select [jcr:path], [jcr:score], *
+  from [nt:base] as a
+  where isdescendantnode(a, '/content')
+  and [i] in('1', '2')
+  union select [jcr:path], [jcr:score], *
+  from [nt:base] as a
+  where isdescendantnode(a, '/content')
+  and [s] = 'x'
+  order by [a]
+  /* xpath ... */
+
 # "or" problem (OAK-1432)
 xpath2sql /jcr:root/content//element(*, nt:unstructured)
   [((@p1 = 'x1' or @p2 = 'x2') or @p3 = 'x3')]
@@ -74,8 +165,7 @@ select d.[jcr:path] as [jcr:path], d.[jcr:score] as [jcr:score], d.*
   and isdescendantnode(a, '/testroot')
   and name(b) = 'c'
   and name(c) = 'd'
-  and (d.[jcr:uuid] = '1'
-  or d.[jcr:uuid] = '2')
+  and d.[jcr:uuid] in('1', '2')
   /* xpath ... */
 
 # property names with missing @
@@ -147,8 +237,11 @@ xpath2sql //*[((@jcr:primaryType = 'nt:unstructured')
 select [jcr:path], [jcr:score], *
   from [nt:base] as a
   where [jcr:primaryType] = 'nt:unstructured'
-  and (contains(*, 'hello')
-  or contains(*, 'world'))
+  and contains(*, 'hello')
+  union select [jcr:path], [jcr:score], *
+  from [nt:base] as a
+  where [jcr:primaryType] = 'nt:unstructured'
+  and contains(*, 'world')
   /* xpath ... */
 
 xpath2sql //*[(((@jcr:primaryType = 'nt:unstructured')
@@ -159,8 +252,11 @@ xpath2sql //*[(((@jcr:primaryType = 'nt:unstructured')
 select [jcr:path], [jcr:score], *
   from [nt:base] as a
   where [jcr:primaryType] = 'nt:unstructured'
-  and (contains(*, 'hello')
-  or contains(*, 'world'))
+  and contains(*, 'hello')
+  union select [jcr:path], [jcr:score], *
+  from [nt:base] as a
+  where [jcr:primaryType] = 'nt:unstructured'
+  and contains(*, 'world')
   union select [jcr:path], [jcr:score], *
   from [nt:base] as a
   where [content] = '/data'
@@ -185,16 +281,13 @@ select b.[jcr:path] as [jcr:path], b.[jcr:score] as [jcr:score], b.*
 xpath2sql //*[@x = 1 or @x = 2]
 select [jcr:path], [jcr:score], *
   from [nt:base] as a
-  where [x] = 1
-  or [x] = 2
+  where [x] in(1, 2)
   /* xpath ... */
 
 xpath2sql //*[@x = 1 or @x = 2 or @x = 3]
 select [jcr:path], [jcr:score], *
   from [nt:base] as a
-  where [x] = 1
-  or [x] = 2
-  or [x] = 3
+  where [x] in(1, 2, 3)
   /* xpath ... */
 
 xpath2sql //*[@x = 1 or @y = 2]
@@ -209,8 +302,7 @@ select [jcr:path], [jcr:score], *
 xpath2sql //*[@x = 1 or @x = 2 or @y = 3]
 select [jcr:path], [jcr:score], *
   from [nt:base] as a
-  where [x] = 1
-  or [x] = 2
+  where [x] in(1, 2)
   union select [jcr:path], [jcr:score], *
   from [nt:base] as a
   where [y] = 3
@@ -296,8 +388,7 @@ select b.[jcr:path] as [jcr:path], b.[jcr:score] as [jcr:score], b.[jcr:uuid] as
   from [nt:base] as a
   inner join [nt:base] as b
   on isdescendantnode(b, a)
-  where (a.[jcr:uuid] = '1'
-  or a.[jcr:uuid] = '2')
+  where a.[jcr:uuid] in('1', '2')
   and b.[jcr:uuid] is not null
   /* xpath ... */
 
@@ -507,10 +598,18 @@ xpath2sql //element(*,rep:Authorizable)
 select [jcr:path], [jcr:score], *
   from [rep:Authorizable] as a
   where contains([profile/givenName/*], '**')
-  or contains([profile/familyName/*], '**')
-  or contains([profile/email/*], '**')
-  or [rep:principalName] like '%%'
-  or name(a) like '%%'
+  union select [jcr:path], [jcr:score], *
+  from [rep:Authorizable] as a
+  where contains([profile/familyName/*], '**')
+  union select [jcr:path], [jcr:score], *
+  from [rep:Authorizable] as a
+  where contains([profile/email/*], '**')
+  union select [jcr:path], [jcr:score], *
+  from [rep:Authorizable] as a
+  where [rep:principalName] like '%%'
+  union select [jcr:path], [jcr:score], *
+  from [rep:Authorizable] as a
+  where name(a) like '%%'
   order by [rep:principalName]
   /* xpath ... */
 
@@ -524,10 +623,18 @@ xpath2sql //element(*,rep:Authorizable)
 select [jcr:path], [jcr:score], *
   from [rep:Authorizable] as a
   where contains([profile/givenName/*], '**')
-  or contains([profile/familyName/*], '**')
-  or contains([profile/email/*], '**')
-  or [rep:principalName] like '%%'
-  or name(a) like '%%'
+  union select [jcr:path], [jcr:score], *
+  from [rep:Authorizable] as a
+  where contains([profile/familyName/*], '**')
+  union select [jcr:path], [jcr:score], *
+  from [rep:Authorizable] as a
+  where contains([profile/email/*], '**')
+  union select [jcr:path], [jcr:score], *
+  from [rep:Authorizable] as a
+  where [rep:principalName] like '%%'
+  union select [jcr:path], [jcr:score], *
+  from [rep:Authorizable] as a
+  where name(a) like '%%'
   order by [rep:principalName]
   /* xpath ... */
 
@@ -589,10 +696,18 @@ xpath2sql //element(*,rep:Authorizable)
 select [jcr:path], [jcr:score], *
   from [rep:Authorizable] as a
   where contains([profile/givenName], '**')
-  or contains([profile/familyName], '**')
-  or contains([profile/email], '**')
-  or [rep:principalName] like '%%'
-  or name(a) like '%%'
+  union select [jcr:path], [jcr:score], *
+  from [rep:Authorizable] as a
+  where contains([profile/familyName], '**')
+  union select [jcr:path], [jcr:score], *
+  from [rep:Authorizable] as a
+  where contains([profile/email], '**')
+  union select [jcr:path], [jcr:score], *
+  from [rep:Authorizable] as a
+  where [rep:principalName] like '%%'
+  union select [jcr:path], [jcr:score], *
+  from [rep:Authorizable] as a
+  where name(a) like '%%'
   order by [rep:principalName]
   /* xpath ... */
 
@@ -938,10 +1053,10 @@ select [jcr:path], [jcr:score], *
   /* xpath ... */
 
 xpath2sql /jcr:root/content/campaigns//element(*, PageContent)
-  [(@sling:resourceType = 'teaser'
-  or @sling:resourceType = 'newsletter'
-  or @teaserPageType = 'newsletter'
-  or @teaserPageType = 'tweet')
+  [((@sling:resourceType = 'teaser'
+  or @sling:resourceType = 'newsletter')
+  or (@teaserPageType = 'newsletter'
+  or @teaserPageType = 'tweet'))
   and ((@onTime < xs:dateTime('2012-04-01T00:00:00.000+02:00'))
   or not(@onTime))
   and ((@offTime >= xs:dateTime('2012-02-26T00:00:00.000+01:00'))
@@ -949,15 +1064,52 @@ xpath2sql /jcr:root/content/campaigns//element(*, PageContent)
   order by @onTime
 select [jcr:path], [jcr:score], *
   from [PageContent] as a
-  where ([sling:resourceType] = 'teaser'
-  or [sling:resourceType] = 'newsletter'
-  or [teaserPageType] = 'newsletter'
-  or [teaserPageType] = 'tweet')
-  and ([onTime] < cast('2012-04-01T00:00:00.000+02:00' as date)
-  or [onTime] is null)
-  and ([offTime] >= cast('2012-02-26T00:00:00.000+01:00' as date)
-  or [offTime] is null)
+  where [onTime] < cast('2012-04-01T00:00:00.000+02:00' as date)
+  and [offTime] >= cast('2012-02-26T00:00:00.000+01:00' as date)
   and isdescendantnode(a, '/content/campaigns')
+  and [sling:resourceType] in('teaser', 'newsletter')
+  union select [jcr:path], [jcr:score], *
+  from [PageContent] as a
+  where [onTime] < cast('2012-04-01T00:00:00.000+02:00' as date)
+  and [offTime] >= cast('2012-02-26T00:00:00.000+01:00' as date)
+  and isdescendantnode(a, '/content/campaigns')
+  and [teaserPageType] in('newsletter', 'tweet')
+  union select [jcr:path], [jcr:score], *
+  from [PageContent] as a
+  where [onTime] is null
+  and [offTime] >= cast('2012-02-26T00:00:00.000+01:00' as date)
+  and isdescendantnode(a, '/content/campaigns')
+  and [sling:resourceType] in('teaser', 'newsletter')
+  union select [jcr:path], [jcr:score], *
+  from [PageContent] as a
+  where [onTime] is null
+  and [offTime] >= cast('2012-02-26T00:00:00.000+01:00' as date)
+  and isdescendantnode(a, '/content/campaigns')
+  and [teaserPageType] in('newsletter', 'tweet')
+  union select [jcr:path], [jcr:score], *
+  from [PageContent] as a
+  where [onTime] < cast('2012-04-01T00:00:00.000+02:00' as date)
+  and [offTime] is null
+  and isdescendantnode(a, '/content/campaigns')
+  and [sling:resourceType] in('teaser', 'newsletter')
+  union select [jcr:path], [jcr:score], *
+  from [PageContent] as a
+  where [onTime] < cast('2012-04-01T00:00:00.000+02:00' as date)
+  and [offTime] is null
+  and isdescendantnode(a, '/content/campaigns')
+  and [teaserPageType] in('newsletter', 'tweet')
+  union select [jcr:path], [jcr:score], *
+  from [PageContent] as a
+  where [onTime] is null
+  and [offTime] is null
+  and isdescendantnode(a, '/content/campaigns')
+  and [sling:resourceType] in('teaser', 'newsletter')
+  union select [jcr:path], [jcr:score], *
+  from [PageContent] as a
+  where [onTime] is null
+  and [offTime] is null
+  and isdescendantnode(a, '/content/campaigns')
+  and [teaserPageType] in('newsletter', 'tweet')
   order by [onTime]
   /* xpath ... */
 
@@ -1201,7 +1353,7 @@ xpath2sql //element(*, my:type)[@my:value = ['x']
 invalid: Query: //element(*, my:type)[@my:value = [(*)'x']; expected: @, true, false, -, +, *, ., @, (
 
 xpath2sql //element(*, my:type)[jcr:strike(@title,'%Java%')]
-invalid: Query: //element(*, my:type)[jcr:strike(@(*)title,'%Java%')]; expected: jcr:like | jcr:contains | jcr:score | xs:dateTime | fn:lower-case | fn:upper-case | fn:name
+invalid: Query: //element(*, my:type)[jcr:strike(@(*)title,'%Java%')]; expected: jcr:like | jcr:contains | jcr:score | xs:dateTime | fn:lower-case | fn:upper-case | fn:name | rep:similar | rep:spellcheck
 
 xpath2sql //element(*, my:type)[
 invalid: Query: //element(*, my:type)(*)[; expected: fn:not, not, (, @, true, false, -, +, *, ., @, (

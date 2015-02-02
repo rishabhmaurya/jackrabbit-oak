@@ -16,19 +16,19 @@
  */
 package org.apache.jackrabbit.oak.security.user;
 
+import org.apache.felix.scr.annotations.Component;
+import org.apache.felix.scr.annotations.Service;
 import org.apache.jackrabbit.oak.api.Root;
 import org.apache.jackrabbit.oak.spi.security.authentication.Authentication;
 import org.apache.jackrabbit.oak.spi.security.user.UserAuthenticationFactory;
 import org.apache.jackrabbit.oak.spi.security.user.UserConfiguration;
 
-import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
+@Component
+@Service
 public class UserAuthenticationFactoryImpl implements UserAuthenticationFactory {
-
-    public UserAuthenticationFactoryImpl() {
-    }
 
     @Nonnull
     @Override

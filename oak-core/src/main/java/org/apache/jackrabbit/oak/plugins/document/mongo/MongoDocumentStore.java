@@ -81,6 +81,7 @@ import com.mongodb.QueryBuilder;
 import com.mongodb.WriteConcern;
 import com.mongodb.WriteResult;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 /**
@@ -145,7 +146,7 @@ public class MongoDocumentStore implements CachingDocumentStore {
      * If set to -1 then modifiedTime index would not be used
      */
     private final long maxDeltaForModTimeIdxSecs =
-            Long.getLong("oak.mongo.maxDeltaForModTimeIdxSecs",120);
+            Long.getLong("oak.mongo.maxDeltaForModTimeIdxSecs",-1);
 
     private String lastReadWriteMode;
 
@@ -196,7 +197,7 @@ public class MongoDocumentStore implements CachingDocumentStore {
         if (builder.useOffHeapCache()) {
             nodesCache = createOffHeapCache(builder);
         } else {
-            nodesCache = builder.buildCache(builder.getDocumentCacheSize());
+            nodesCache = builder.buildDocumentCache(this);
         }
 
         cacheStats = new CacheStats(nodesCache, "Document-Documents", builder.getWeigher(),
@@ -303,7 +304,8 @@ public class MongoDocumentStore implements CachingDocumentStore {
                                        boolean preferCached,
                                        final int maxCacheAge) {
         if (collection != Collection.NODES) {
-            return findUncached(collection, key, DocumentReadPreference.PRIMARY);
+            return findUncachedWithRetry(collection, key,
+                    DocumentReadPreference.PRIMARY, 2);
         }
         CacheValue cacheKey = new StringValue(key);
         NodeDocument doc;
@@ -331,7 +333,9 @@ public class MongoDocumentStore implements CachingDocumentStore {
                     doc = nodesCache.get(cacheKey, new Callable<NodeDocument>() {
                         @Override
                         public NodeDocument call() throws Exception {
-                            NodeDocument doc = (NodeDocument) findUncached(collection, key, getReadPreference(maxCacheAge));
+                            NodeDocument doc = (NodeDocument) findUncachedWithRetry(
+                                    collection, key,
+                                    getReadPreference(maxCacheAge), 2);
                             if (doc == null) {
                                 doc = NodeDocument.NULL;
                             }
@@ -363,8 +367,46 @@ public class MongoDocumentStore implements CachingDocumentStore {
         throw new DocumentStoreException("Failed to load document with " + key, t);
     }
 
+    /**
+     * Finds a document and performs a number of retries if the read fails with
+     * an exception.
+     *
+     * @param collection the collection to read from.
+     * @param key the key of the document to find.
+     * @param docReadPref the read preference.
+     * @param retries the number of retries. Must not be negative.
+     * @param <T> the document type of the given collection.
+     * @return the document or {@code null} if the document doesn't exist.
+     */
     @CheckForNull
-    private <T extends Document> T findUncached(Collection<T> collection, String key, DocumentReadPreference docReadPref) {
+    private <T extends Document> T findUncachedWithRetry(
+            Collection<T> collection, String key,
+            DocumentReadPreference docReadPref,
+            int retries) {
+        checkArgument(retries >= 0, "retries must not be negative");
+        int numAttempts = retries + 1;
+        MongoException ex = null;
+        for (int i = 0; i < numAttempts; i++) {
+            if (i > 0) {
+                LOG.warn("Retrying read of " + key);
+            }
+            try {
+                return findUncached(collection, key, docReadPref);
+            } catch (MongoException e) {
+                ex = e;
+            }
+        }
+        if (ex != null) {
+            throw ex;
+        } else {
+            // impossible to get here
+            throw new IllegalStateException();
+        }
+    }
+
+    @CheckForNull
+    protected <T extends Document> T findUncached(Collection<T> collection, String key, DocumentReadPreference docReadPref) {
+        log("findUncached", key, docReadPref);
         DBCollection dbCollection = getDBCollection(collection);
         long start = start();
         try {
@@ -417,7 +459,7 @@ public class MongoDocumentStore implements CachingDocumentStore {
                                               String indexedProperty,
                                               long startValue,
                                               int limit) {
-        log("query", fromKey, toKey, limit);
+        log("query", fromKey, toKey, indexedProperty, startValue, limit);
         DBCollection dbCollection = getDBCollection(collection);
         QueryBuilder queryBuilder = QueryBuilder.start(Document.ID);
         queryBuilder.greaterThan(fromKey);
@@ -426,12 +468,22 @@ public class MongoDocumentStore implements CachingDocumentStore {
         DBObject hint = new BasicDBObject(NodeDocument.ID, 1);
 
         if (indexedProperty != null) {
-            queryBuilder.and(indexedProperty);
-            queryBuilder.greaterThanEquals(startValue);
+            if (NodeDocument.DELETED_ONCE.equals(indexedProperty)) {
+                if (startValue != 1) {
+                    throw new DocumentStoreException(
+                            "unsupported value for property " + 
+                                    NodeDocument.DELETED_ONCE);
+                }
+                queryBuilder.and(indexedProperty);
+                queryBuilder.is(true);
+            } else {
+                queryBuilder.and(indexedProperty);
+                queryBuilder.greaterThanEquals(startValue);
 
-            if (NodeDocument.MODIFIED_IN_SECS.equals(indexedProperty)
-                    && canUseModifiedTimeIdx(startValue)) {
-                hint = new BasicDBObject(NodeDocument.MODIFIED_IN_SECS, -1);
+                if (NodeDocument.MODIFIED_IN_SECS.equals(indexedProperty)
+                        && canUseModifiedTimeIdx(startValue)) {
+                    hint = new BasicDBObject(NodeDocument.MODIFIED_IN_SECS, -1);
+                }
             }
         }
         DBObject query = queryBuilder.get();
@@ -502,7 +554,7 @@ public class MongoDocumentStore implements CachingDocumentStore {
         DBCollection dbCollection = getDBCollection(collection);
         long start = start();
         try {
-            WriteResult writeResult = dbCollection.remove(getByKeyQuery(key).get(), WriteConcern.SAFE);
+            WriteResult writeResult = dbCollection.remove(getByKeyQuery(key).get());
             invalidateCache(collection, key);
             if (writeResult.getError() != null) {
                 throw new DocumentStoreException("Remove failed: " + writeResult.getError());
@@ -514,10 +566,11 @@ public class MongoDocumentStore implements CachingDocumentStore {
 
     @Override
     public <T extends Document> void remove(Collection<T> collection, List<String> keys) {
+        log("remove", keys);
         DBCollection dbCollection = getDBCollection(collection);
         for(List<String> keyBatch : Lists.partition(keys, IN_CLAUSE_BATCH_SIZE)){
             DBObject query = QueryBuilder.start(Document.ID).in(keyBatch).get();
-            WriteResult writeResult = dbCollection.remove(query, WriteConcern.SAFE);
+            WriteResult writeResult = dbCollection.remove(query);
             invalidateCache(collection, keyBatch);
             if (writeResult.getError() != null) {
                 throw new DocumentStoreException("Remove failed: " + writeResult.getError());
@@ -663,7 +716,7 @@ public class MongoDocumentStore implements CachingDocumentStore {
         long start = start();
         try {
             try {
-                WriteResult writeResult = dbCollection.insert(inserts, WriteConcern.SAFE);
+                WriteResult writeResult = dbCollection.insert(inserts);
                 if (writeResult.getError() != null) {
                     return false;
                 }
@@ -690,6 +743,7 @@ public class MongoDocumentStore implements CachingDocumentStore {
     public <T extends Document> void update(Collection<T> collection,
                                             List<String> keys,
                                             UpdateOp updateOp) {
+        log("update", keys, updateOp);
         DBCollection dbCollection = getDBCollection(collection);
         QueryBuilder query = QueryBuilder.start(Document.ID).in(keys);
         // make sure we don't modify the original updateOp
@@ -705,7 +759,7 @@ public class MongoDocumentStore implements CachingDocumentStore {
                 }
             }
             try {
-                WriteResult writeResult = dbCollection.update(query.get(), update, false, true, WriteConcern.SAFE);
+                WriteResult writeResult = dbCollection.update(query.get(), update, false, true);
                 if (writeResult.getError() != null) {
                     throw new DocumentStoreException("Update failed: " + writeResult.getError());
                 }
@@ -714,7 +768,8 @@ public class MongoDocumentStore implements CachingDocumentStore {
                     for (Entry<String, NodeDocument> entry : cachedDocs.entrySet()) {
                         TreeLock lock = acquire(entry.getKey());
                         try {
-                            if (entry.getValue() == null) {
+                            if (entry.getValue() == null
+                                    || entry.getValue() == NodeDocument.NULL) {
                                 // make sure concurrently loaded document is invalidated
                                 nodesCache.invalidate(new StringValue(entry.getKey()));
                             } else {
@@ -763,13 +818,16 @@ public class MongoDocumentStore implements CachingDocumentStore {
                     return ReadPreference.primary();
                 }
 
-                //Default to primary preferred such that in case primary is being elected
-                //we can still read from secondary
-                //TODO REVIEW Would that be safe
-                ReadPreference readPreference = ReadPreference.primaryPreferred();
+                // read from primary unless parent has not been modified
+                // within replication lag period
+                ReadPreference readPreference = ReadPreference.primary();
                 if (parentId != null) {
                     long replicationSafeLimit = getTime() - maxReplicationLagMillis;
                     NodeDocument cachedDoc = (NodeDocument) getIfCached(collection, parentId);
+                    // FIXME: this is not quite accurate, because ancestors
+                    // are updated in a background thread (_lastRev). We
+                    // will need to revise this for low maxReplicationLagMillis
+                    // values
                     if (cachedDoc != null && !cachedDoc.hasBeenModifiedSince(replicationSafeLimit)) {
 
                         //If parent has been modified loooong time back then there children
@@ -805,6 +863,8 @@ public class MongoDocumentStore implements CachingDocumentStore {
                 if (o instanceof String) {
                     copy.put(key, o);
                 } else if (o instanceof Long) {
+                    copy.put(key, o);
+                } else if (o instanceof Integer) {
                     copy.put(key, o);
                 } else if (o instanceof Boolean) {
                     copy.put(key, o);

@@ -31,15 +31,17 @@ import org.apache.jackrabbit.oak.Oak;
 import org.apache.jackrabbit.oak.api.ContentRepository;
 import org.apache.jackrabbit.oak.api.Tree;
 import org.apache.jackrabbit.oak.api.Type;
-import org.apache.jackrabbit.oak.plugins.index.aggregate.AggregateIndexProvider;
 import org.apache.jackrabbit.oak.plugins.index.aggregate.NodeAggregator;
 import org.apache.jackrabbit.oak.plugins.index.aggregate.SimpleNodeAggregator;
 
+import static org.apache.jackrabbit.oak.plugins.index.lucene.TestUtil.newNodeAggregator;
+import static org.apache.jackrabbit.oak.plugins.index.lucene.TestUtil.useV2;
 import static org.apache.jackrabbit.oak.plugins.memory.BinaryPropertyState.binaryProperty;
 
 import org.apache.jackrabbit.oak.plugins.nodetype.write.InitialContent;
 import org.apache.jackrabbit.oak.query.AbstractQueryTest;
 import org.apache.jackrabbit.oak.spi.commit.Observer;
+import org.apache.jackrabbit.oak.spi.query.QueryIndexProvider;
 import org.apache.jackrabbit.oak.spi.security.OpenSecurityProvider;
 import org.junit.Test;
 
@@ -50,7 +52,17 @@ public class LuceneIndexAggregationTest extends AbstractQueryTest {
     @Override
     protected void createTestIndexNode() throws Exception {
         Tree index = root.getTree("/");
-        createTestIndexNode(index, LuceneIndexConstants.TYPE_LUCENE);
+        Tree indexDefn = createTestIndexNode(index, LuceneIndexConstants.TYPE_LUCENE);
+        useV2(indexDefn);
+        //Aggregates
+        newNodeAggregator(indexDefn)
+                .newRuleWithName(NT_FILE, newArrayList(JCR_CONTENT, JCR_CONTENT + "/*"))
+                .newRuleWithName(NT_FOLDER, newArrayList("myFile", "subfolder/subsubfolder/file"));
+
+        //Include all properties
+        Tree props = TestUtil.newRulePropTree(indexDefn, "nt:base");
+        TestUtil.enableForFullText(props, LuceneIndexConstants.REGEX_ALL_PROPS, true);
+
         root.commit();
     }
 
@@ -60,7 +72,7 @@ public class LuceneIndexAggregationTest extends AbstractQueryTest {
         return new Oak()
                 .with(new InitialContent())
                 .with(new OpenSecurityProvider())
-                .with(AggregateIndexProvider.wrap(provider.with(getNodeAggregator())))
+                .with((QueryIndexProvider)provider.with(getNodeAggregator()))
                 .with((Observer) provider)
                 .with(new LuceneIndexEditorProvider())
                 .createContentRepository();
@@ -394,6 +406,10 @@ public class LuceneIndexAggregationTest extends AbstractQueryTest {
                 "//element(*, nt:file)[jcr:contains(., 'dog') and jcr:contains(., 'title')]", 
                 "xpath", ImmutableList.of("/myFolder/myFile"));
 
+        // double aggregation dupes
+        assertQuery(
+                    "//*[(jcr:contains(., 'dog') or jcr:contains(jcr:content, 'dog') )]",
+                    "xpath", ImmutableList.of("/myFolder", "/myFolder/myFile", "/myFolder/myFile/jcr:content"));
     }
 
 }

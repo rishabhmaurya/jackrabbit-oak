@@ -21,6 +21,7 @@ import java.util.Map;
 import javax.jcr.Credentials;
 import javax.jcr.GuestCredentials;
 import javax.jcr.Repository;
+import javax.jcr.RepositoryException;
 import javax.jcr.Session;
 import javax.jcr.SimpleCredentials;
 import javax.jcr.security.Privilege;
@@ -32,7 +33,8 @@ import org.apache.jackrabbit.api.security.authentication.token.TokenCredentials;
 import org.apache.jackrabbit.api.security.user.Authorizable;
 import org.apache.jackrabbit.api.security.user.User;
 import org.apache.jackrabbit.commons.jackrabbit.authorization.AccessControlUtils;
-import org.apache.jackrabbit.oak.fixture.JcrCustomizer;
+import org.apache.jackrabbit.oak.Oak;
+import org.apache.jackrabbit.oak.fixture.JcrCreator;
 import org.apache.jackrabbit.oak.fixture.OakRepositoryFixture;
 import org.apache.jackrabbit.oak.fixture.RepositoryFixture;
 import org.apache.jackrabbit.oak.jcr.Jcr;
@@ -71,37 +73,16 @@ abstract class AbstractLoginTest extends AbstractTest {
 
     @Override
     public void setUp(Repository repository, Credentials credentials) throws Exception {
-        Credentials creds;
-        if ("admin".equals(runAsUser)) {
-            creds = credentials;
-        } else if ("anonymous".equals(runAsUser)) {
-            creds = new GuestCredentials();
-        } else {
-            creds = new SimpleCredentials(USER, USER.toCharArray());
-        }
-        super.setUp(repository, creds);
-
+        super.setUp(repository, buildCredentials(repository, credentials));
         Session s = loginAdministrative();
         try {
             AccessControlUtils.addAccessControlEntry(s, "/", EveryonePrincipal.getInstance(), new String[]{Privilege.JCR_READ}, true);
-            if ("user".equals(runAsUser)) {
+            if (USER.equals(runAsUser)) {
                 User user = ((JackrabbitSession) s).getUserManager().createUser(USER, USER);
             }
         } finally {
             s.save();
             s.logout();
-        }
-
-        if (runWithToken) {
-            Configuration.setConfiguration(ConfigurationUtil.getJackrabbit2Configuration(ConfigurationParameters.EMPTY));
-            if (creds instanceof SimpleCredentials) {
-                SimpleCredentials sc = (SimpleCredentials) creds;
-                sc.setAttribute(".token", "");
-                repository.login(sc).logout();
-                creds = new TokenCredentials(sc.getAttribute(".token").toString());
-            } else {
-                throw new UnsupportedOperationException();
-            }
         }
     }
 
@@ -125,14 +106,14 @@ abstract class AbstractLoginTest extends AbstractTest {
         if (noIterations != -1) {
             if (fixture instanceof OakRepositoryFixture) {
                 final String configName = (runWithToken) ? TokenConfiguration.NAME : UserConfiguration.NAME;
-                return ((OakRepositoryFixture) fixture).setUpCluster(1, new JcrCustomizer() {
+                return ((OakRepositoryFixture) fixture).setUpCluster(1, new JcrCreator() {
                     @Override
-                    public Jcr customize(Jcr jcr) {
+                    public Jcr customize(Oak oak) {
                         Map<String, Integer> map = Collections.singletonMap(UserConstants.PARAM_PASSWORD_HASH_ITERATIONS, noIterations);
                         ConfigurationParameters conf = ConfigurationParameters.of(map);
                         SecurityProvider sp = new SecurityProviderImpl(ConfigurationParameters.of(ImmutableMap.of(configName, conf)));
-                        jcr.with(sp);
-                        return jcr;
+                        oak.with(sp);
+                        return new Jcr(oak);
                     }
                 });
             } else {
@@ -140,5 +121,28 @@ abstract class AbstractLoginTest extends AbstractTest {
             }
         }
         return super.createRepository(fixture);
+    }
+
+    private Credentials buildCredentials(Repository repository, Credentials credentials) throws RepositoryException {
+        Credentials creds;
+        if ("admin".equals(runAsUser)) {
+            creds = credentials;
+        } else if ("anonymous".equals(runAsUser)) {
+            creds = new GuestCredentials();
+        } else {
+            creds = new SimpleCredentials(USER, USER.toCharArray());
+        }
+        if (runWithToken) {
+            Configuration.setConfiguration(ConfigurationUtil.getJackrabbit2Configuration(ConfigurationParameters.EMPTY));
+            if (creds instanceof SimpleCredentials) {
+                SimpleCredentials sc = (SimpleCredentials) creds;
+                sc.setAttribute(".token", "");
+                repository.login(sc).logout();
+                creds = new TokenCredentials(sc.getAttribute(".token").toString());
+            } else {
+                throw new UnsupportedOperationException();
+            }
+        }
+        return creds;
     }
 }

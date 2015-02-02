@@ -69,7 +69,6 @@
       org.apache.jackrabbit.test.api.lock.SessionScopedLockTest#testImplicitUnlock2
 
       <!-- Observation -->
-      org.apache.jackrabbit.test.api.observation.GetInfoTest                            <!-- OAK-1661, OAK-1669, uncomment if test expectations gets changed see JCR-3765  -->
       org.apache.jackrabbit.test.api.observation.NodeRemovedTest#testMultiNodesRemoved  <!-- OAK-1459 -->
       org.apache.jackrabbit.test.api.observation.NodeMovedTest#testMoveWithRemove       <!-- OAK-1459 -->
       org.apache.jackrabbit.test.api.observation.GetIdentifierTest#testNodeMoved  <!-- Move in 2nd session not reflected in nodes of 1st session -->
@@ -79,6 +78,7 @@
       org.apache.jackrabbit.core.observation.ReorderTest                                           <!-- Uses SNS -->
       org.apache.jackrabbit.core.observation.ShareableNodesTest#testAddShare                       <!-- OAK-118 workspace support needed -->
       org.apache.jackrabbit.core.observation.ShareableNodesTest#testRemoveShare                    <!-- OAK-118 workspace support needed -->
+      org.apache.jackrabbit.core.observation.MixinTest <!--FIXME OAK-2165 -->
 
       <!-- Versioning -->
       org.apache.jackrabbit.test.api.version.VersionTest#testMerge
@@ -123,6 +123,7 @@
       org.apache.jackrabbit.core.query.DerefTest#testRewrite                                         <!-- OAK-321 -->
       org.apache.jackrabbit.core.query.DerefTest#testDerefToVersionNode                              <!-- OAK-321 -->
       org.apache.jackrabbit.core.query.DerefTest#testMultipleDeref                                   <!-- OAK-321 -->
+      org.apache.jackrabbit.core.query.FulltextQueryTest#testMultipleOrExpressions                   <!-- OAK-2249 -->
       org.apache.jackrabbit.core.query.FulltextQueryTest#testContainsPropScopeSQL                    <!-- OAK-902 -->
       org.apache.jackrabbit.core.query.FulltextQueryTest#testContainsPropScopeXPath                  <!-- OAK-902 -->
       org.apache.jackrabbit.core.query.XPathAxisTest#testIndex0Descendant                            <!-- OAK-322 -->
@@ -244,6 +245,13 @@
       <groupId>org.apache.jackrabbit</groupId>
       <artifactId>oak-commons</artifactId>
       <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.jackrabbit</groupId>
+      <artifactId>oak-commons</artifactId>
+      <version>${project.version}</version>
+      <type>test-jar</type>
+      <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.apache.jackrabbit</groupId>

@@ -17,12 +17,16 @@
 
 package org.apache.jackrabbit.oak.plugins.index.property.strategy;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.collect.Iterators.singletonIterator;
 import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.ENTRY_COUNT_PROPERTY_NAME;
 import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.INDEX_CONTENT_NODE_NAME;
+import static org.apache.jackrabbit.oak.plugins.index.property.OrderedIndex.LANES;
 
 import java.io.UnsupportedEncodingException;
 import java.net.URLEncoder;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Deque;
 import java.util.Iterator;
@@ -39,6 +43,7 @@ import org.apache.jackrabbit.oak.plugins.index.property.OrderedIndex;
 import org.apache.jackrabbit.oak.plugins.index.property.OrderedIndex.OrderDirection;
 import org.apache.jackrabbit.oak.plugins.index.property.OrderedIndex.Predicate;
 import org.apache.jackrabbit.oak.plugins.memory.EmptyNodeState;
+import org.apache.jackrabbit.oak.plugins.memory.MemoryChildNodeEntry;
 import org.apache.jackrabbit.oak.spi.query.Filter;
 import org.apache.jackrabbit.oak.spi.query.Filter.PropertyRestriction;
 import org.apache.jackrabbit.oak.spi.state.AbstractChildNodeEntry;
@@ -51,7 +56,6 @@ import org.slf4j.LoggerFactory;
 
 import com.google.common.base.Charsets;
 import com.google.common.base.Strings;
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 
@@ -73,7 +77,8 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
     /**
      * convenience property for initialising an empty multi-value :next
      */
-    public static final Iterable<String> EMPTY_NEXT = ImmutableList.of("", "", "", "");
+    public static final Iterable<String> EMPTY_NEXT = 
+            Collections.nCopies(OrderedIndex.LANES, "");
     
     /**
      * convenience property that represent an empty :next as array
@@ -101,9 +106,15 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
     private static final Random RND = new Random(System.currentTimeMillis());
     
     /**
+     * maximum number of attempt for potential recursive processes like seek() 
+     */
+    private static final int MAX_RETRIES = LANES+1;
+        
+    /**
      * the direction of the index.
      */
     private OrderDirection direction = OrderedIndex.DEFAULT_DIRECTION;
+    
 
     public OrderedContentMirrorStoreStrategy() {
         super();
@@ -114,8 +125,22 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
         this.direction = direction;
     }
     
+    private static void printWalkedLanes(final String msg, final String[] walked) {
+        if (LOG.isTraceEnabled()) {
+            String m = (msg == null) ? "" : msg;
+            if (walked == null) {
+                LOG.trace(m + " walked: null");
+            } else {
+                for (int i = 0; i < walked.length; i++) {
+                    LOG.trace("{}walked[{}]: {}", new Object[] { m, i, walked[i] });
+                }
+            }
+        }
+    }
+    
     @Override
     NodeBuilder fetchKeyNode(@Nonnull NodeBuilder index, @Nonnull String key) {
+        LOG.debug("fetchKeyNode() - === new item '{}'", key);
         // this is where the actual adding and maintenance of index's keys happen
         NodeBuilder node = null;
         NodeBuilder start = index.child(START);
@@ -131,9 +156,15 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
         
         // we use the seek for seeking the right spot. The walkedLanes will have all our
         // predecessors
-        String entry = seek(index, condition, walked);
+        String entry = seek(index, condition, walked, 0, new FixingDanglingLinkCallback(index));
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("fetchKeyNode() - entry: {} ", entry);
+            printWalkedLanes("fetchKeyNode() - ", walked);
+        }
+        
         if (entry != null && entry.equals(key)) {
             // it's an existing node. We should not need to update anything around pointers
+            LOG.debug("fetchKeyNode() - node already there.");
             node = index.getChildNode(key);
         } else {
             // the entry does not exits yet
@@ -141,6 +172,7 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
             // it's a brand new node. let's start setting an empty next
             setPropertyNext(node, EMPTY_NEXT_ARRAY);
             int lane = getLane();
+            LOG.debug("fetchKeyNode() - extracted lane: {}", lane);
             String next;
             NodeBuilder predecessor;
             for (int l = lane; l >= 0; l--) {
@@ -149,6 +181,12 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
                 next = getPropertyNext(predecessor, l);
                 setPropertyNext(predecessor, key, l);
                 setPropertyNext(node, next, l);
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("fetchKeyNode() - on lane: {}", l);
+                    LOG.debug("fetchKeyNode() - next from previous: {}", next);
+                    LOG.debug("fetchKeyNode() - new status of predecessor name: {} - {} ", walked[l], predecessor.getProperty(NEXT));
+                    LOG.debug("fetchKeyNode() - new node name: {} - {}", key, node.getProperty(NEXT));
+                }
             }
         }
         return node;
@@ -171,7 +209,9 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
                     do {
                         entry = seek(index,
                             new PredicateEquals(key),
-                            walkedLanes
+                            walkedLanes,
+                            0,
+                            new LoggingDanglinLinkCallback()
                             );
                         lane0Next = getPropertyNext(index.getChildNode(walkedLanes[0]));
                         if (LOG.isDebugEnabled()) {
@@ -239,6 +279,11 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
         }
         return cne;
     }
+    
+    public Iterable<String> query(final Filter filter, final String indexName,
+            final NodeState indexMeta, final PropertyRestriction pr) {
+        return query(filter, indexName, indexMeta, pr, "");
+    }
 
     /**
      * search the index for the provided PropertyRestriction
@@ -250,8 +295,9 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
      * @return the iterable
      */
     public Iterable<String> query(final Filter filter, final String indexName,
-                                  final NodeState indexMeta, final PropertyRestriction pr) {
-        return query(filter, indexName, indexMeta, INDEX_CONTENT_NODE_NAME, pr);
+                                  final NodeState indexMeta, final PropertyRestriction pr,
+                                  String pathPrefix) {
+        return query(filter, indexName, indexMeta, INDEX_CONTENT_NODE_NAME, pr, pathPrefix);
     }
 
     /**
@@ -267,39 +313,54 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
      */
     public Iterable<String> query(final Filter filter, final String indexName,
                                   final NodeState indexMeta, final String indexStorageNodeName,
-                                  final PropertyRestriction pr) {
+                                  final PropertyRestriction pr, String pathPrefix) {
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("query() - filter: {}", filter);            
+            LOG.debug("query() - indexName: {}", indexName);            
+            LOG.debug("query() - indexMeta: {}", indexMeta);            
+            LOG.debug("query() - indexStorageNodeName: {}", indexStorageNodeName);            
+            LOG.debug("query() - pr: {}", pr);            
+        }
         
         final NodeState indexState = indexMeta.getChildNode(indexStorageNodeName);
         final NodeBuilder index = new ReadOnlyBuilder(indexState);
-
-        if (pr.first != null && !pr.first.equals(pr.last)) {
+        final String firstEncoded = (pr.first == null) ? null 
+                                                       : encode(pr.first.getValue(Type.STRING));
+        final String lastEncoded = (pr.last == null) ? null
+                                                     : encode(pr.last.getValue(Type.STRING));
+        
+        if (firstEncoded != null && !firstEncoded.equals(lastEncoded)) {
             // '>' & '>=' and between use case
+            LOG.debug("'>' & '>=' and between use case");
             ChildNodeEntry firstValueableItem;
             String firstValuableItemKey;
             Iterable<String> it = Collections.emptyList();
             Iterable<ChildNodeEntry> childrenIterable;
             
-            if (pr.last == null) {
+            if (lastEncoded == null) {
                 LOG.debug("> & >= case.");
                 firstValuableItemKey = seek(index,
-                    new PredicateGreaterThan(pr.first.getValue(Type.STRING), pr.firstIncluding));
+                    new PredicateGreaterThan(firstEncoded, pr.firstIncluding));
                 if (firstValuableItemKey != null) {
                     firstValueableItem = new OrderedChildNodeEntry(firstValuableItemKey,
                         indexState.getChildNode(firstValuableItemKey));
                     if (direction.isAscending()) {
                         childrenIterable = new SeekedIterable(indexState, firstValueableItem);
-                        it = new QueryResultsWrapper(filter, indexName, childrenIterable);
+                        it = new QueryResultsWrapper(filter, indexName, 
+                                childrenIterable, pathPrefix);
                     } else {
-                        it = new QueryResultsWrapper(filter, indexName, new BetweenIterable(
-                            indexState, firstValueableItem, pr.first.getValue(Type.STRING),
-                            pr.firstIncluding, direction));
+                        it = new QueryResultsWrapper(filter, indexName, 
+                                new BetweenIterable(
+                                        indexState, firstValueableItem, firstEncoded,
+                                        pr.firstIncluding, direction),
+                                pathPrefix);
                     }
                 }
             } else {
                 String first, last;
                 boolean includeFirst, includeLast;
-                first = pr.first.getValue(Type.STRING);
-                last = pr.last.getValue(Type.STRING);
+                first = firstEncoded;
+                last = lastEncoded;
                 includeFirst = pr.firstIncluding;
                 includeLast = pr.lastIncluding;
 
@@ -325,14 +386,16 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
                         indexState.getChildNode(firstValuableItemKey));
                     childrenIterable = new BetweenIterable(indexState, firstValueableItem, last,
                         includeLast, direction);
-                    it = new QueryResultsWrapper(filter, indexName, childrenIterable);
+                    it = new QueryResultsWrapper(filter, indexName, 
+                            childrenIterable, pathPrefix);
                 }
             }
 
             return it;
-        } else if (pr.last != null && !pr.last.equals(pr.first)) {
+        } else if (lastEncoded != null && !lastEncoded.equals(firstEncoded)) {
             // '<' & '<=' use case
-            final String searchfor = pr.last.getValue(Type.STRING);
+            LOG.debug("'<' & '<=' use case");
+            final String searchfor = lastEncoded;
             final boolean include = pr.lastIncluding;
             Predicate<String> predicate = new PredicateLessThan(searchfor, include);
             
@@ -349,18 +412,40 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
                 firstValueableItem = new OrderedChildNodeEntry(firstValueableItemKey,
                     indexState.getChildNode(firstValueableItemKey));
                 if (direction.isAscending()) {
-                    it = new QueryResultsWrapper(filter, indexName, new BetweenIterable(indexState,
-                        firstValueableItem, searchfor, include, direction));
+                    it = new QueryResultsWrapper(filter, indexName, 
+                            new BetweenIterable(indexState, firstValueableItem, searchfor, include, direction),
+                            pathPrefix);
                 } else {
-                    it = new QueryResultsWrapper(filter, indexName, new SeekedIterable(indexState,
-                        firstValueableItem));
+                    it = new QueryResultsWrapper(filter, indexName, 
+                            new SeekedIterable(indexState, firstValueableItem),
+                            pathPrefix);
                 }
             }
             return it;
+        } else if (firstEncoded != null && firstEncoded.equals(lastEncoded)) {
+            // property = $value case
+            LOG.debug("'property = $value' case");
+            
+            final NodeState key = indexState.getChildNode(firstEncoded);
+            final String pf = pathPrefix;
+            if (key.exists()) {
+                return new Iterable<String>() {
+                    @Override
+                    public Iterator<String> iterator() {
+                        PathIterator pi = new PathIterator(filter, indexName, pf);
+                        pi.setPathContainsValue(true);
+                        pi.enqueue(singletonIterator(new MemoryChildNodeEntry(firstEncoded, key)));
+                        return pi;
+                    }
+                };
+            } else {
+                return Collections.emptyList();
+            }
         } else {
             // property is not null. AKA "open query"
-            Iterable<String> values = null;
-            return query(filter, indexName, indexMeta, values);
+            LOG.debug("property is not null. AKA 'open query'. FullIterable");
+            return new QueryResultsWrapper(filter, indexName, 
+                    new FullIterable(indexState, false), pathPrefix);
         }
     }
     
@@ -564,17 +649,20 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
         private Iterable<ChildNodeEntry> children;
         private String indexName;
         private Filter filter;
+        private String pathPrefix;
 
         public QueryResultsWrapper(Filter filter, String indexName,
-                                   Iterable<ChildNodeEntry> children) {
+                                   Iterable<ChildNodeEntry> children,
+                                   String pathPrefix) {
             this.children = children;
             this.indexName = indexName;
             this.filter = filter;
+            this.pathPrefix = pathPrefix;
         }
 
         @Override
         public Iterator<String> iterator() {
-            PathIterator pi = new PathIterator(filter, indexName);
+            PathIterator pi = new PathIterator(filter, indexName, pathPrefix);
             pi.setPathContainsValue(true);
             pi.enqueue(children.iterator());
             return pi;
@@ -590,7 +678,9 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
         private NodeState start;
         NodeState current;
         private NodeState index;
+        private NodeBuilder builder;
         String currentName;
+        private DanglingLinkCallback dlc = new LoggingDanglinLinkCallback();
 
         public FullIterator(NodeState index, NodeState start, boolean includeStart,
                             NodeState current) {
@@ -598,12 +688,21 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
             this.start = start;
             this.current = current;
             this.index = index;
+            this.builder = new ReadOnlyBuilder(index);
         }
 
         @Override
         public boolean hasNext() {
-            return (includeStart && start.equals(current))
-                   || (!includeStart && !Strings.isNullOrEmpty(getPropertyNext(current)));
+            String next = getPropertyNext(current);
+            boolean hasNext = (includeStart && start.equals(current))
+                || (!includeStart && !Strings.isNullOrEmpty(next)
+                    && ensureAndCleanNode(
+                                  builder, next, 
+                                  currentName == null ? "" : currentName, 
+                                  0,
+                                  dlc));
+                        
+            return hasNext;
         }
 
         @Override
@@ -622,6 +721,7 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
                     throw new NoSuchElementException();
                 }
             }
+            
             return entry;
         }
 
@@ -730,7 +830,7 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
      * last argument
      */
     String seek(@Nonnull NodeBuilder index, @Nonnull Predicate<String> condition) {
-        return seek(index, condition, null);
+        return seek(index, condition, null, 0, new LoggingDanglinLinkCallback());
     }
     
     /**
@@ -744,14 +844,20 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
      *            lane represented by the corresponding position in the array. <b>You have</b> to
      *            pass in an array already sized as {@link OrderedIndex#LANES} or an
      *            {@link IllegalArgumentException} will be raised
+     * @param retries the number of retries
      * @return the entry or null if not found
      */
     String seek(@Nonnull final NodeBuilder index,
                                @Nonnull final Predicate<String> condition,
-                               @Nullable final String[] walkedLanes) {
+                               @Nullable final String[] walkedLanes, 
+                               int retries,
+                               @Nullable DanglingLinkCallback callback) {
         boolean keepWalked = false;
         String searchfor = condition.getSearchFor();
-        LOG.debug("seek() - Searching for: {}", condition.getSearchFor());        
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("seek() - Searching for: {}", condition.getSearchFor());        
+            LOG.debug("seek() - condition: {}", condition);
+        }
         Predicate<String> walkingPredicate = direction.isAscending() 
                                                              ? new PredicateLessThan(searchfor, true)
                                                              : new PredicateGreaterThan(searchfor, true);
@@ -781,6 +887,8 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
             // we're asking for a <, <= query from ascending index or >, >= from descending
             // we have to walk the lanes from bottom to up rather than up to bottom.
             
+            LOG.debug("seek() - cross case");
+            
             lane = 0;
             do {
                 stillLaning = lane < OrderedIndex.LANES;
@@ -791,41 +899,118 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
                     lane++;
                 } else {
                     if (condition.apply(nextkey)) {
+                        // this branch is used so far only for range queries.
+                        // while figuring out how to correctly reproduce the issue is less risky
+                        // to leave this untouched.
                         found = nextkey;
                     } else {
                         currentKey = nextkey;
-                        if (keepWalked && !Strings.isNullOrEmpty(currentKey)) {
+                        if (keepWalked && !Strings.isNullOrEmpty(currentKey) && walkedLanes != null) {
                             walkedLanes[lane] = currentKey;
                         }
                     }
                 }
             } while (((!Strings.isNullOrEmpty(nextkey) && walkingPredicate.apply(nextkey)) || stillLaning) && (found == null));
         } else {
+            LOG.debug("seek() - plain case");
+            
             lane = OrderedIndex.LANES - 1;
+            NodeBuilder currentNode = null;
+            int iteration = 0;
+            boolean exitCondition = true;
             
             do {
+                iteration++;
                 stillLaning = lane > 0;
-                nextkey = getPropertyNext(index.getChildNode(currentKey), lane);
+                if (currentNode == null) {
+                    currentNode = index.getChildNode(currentKey);
+                }
+                nextkey = getPropertyNext(currentNode, lane);
                 if ((Strings.isNullOrEmpty(nextkey) || !walkingPredicate.apply(nextkey)) && lane > 0) {
                     // if we're currently pointing to NIL or the next element does not fit the search
                     // but we still have lanes left, let's lower the lane;
                     lane--;
                 } else {
                     if (condition.apply(nextkey)) {
-                        found = nextkey;
+                        if (ensureAndCleanNode(index, nextkey, currentKey, lane, callback)) {
+                            found = nextkey;
+                        } else {
+                            if (retries < MAX_RETRIES) {
+                                return seek(index, condition, walkedLanes, ++retries, callback);
+                            } else {
+                                LOG.debug(
+                                    "Attempted a lookup and fix for {} times. Leaving it be and returning null",
+                                    retries);
+                                return null;
+                            }
+                        }
                     } else {
                         currentKey = nextkey;
-                        if (keepWalked && !Strings.isNullOrEmpty(currentKey)) {
+                        currentNode = null;
+                        if (keepWalked && !Strings.isNullOrEmpty(currentKey) && walkedLanes != null) {
                             for (int l = lane; l >= 0; l--) {
                                 walkedLanes[l] = currentKey;
                             }
                         }
                     }
                 }
-            } while (((!Strings.isNullOrEmpty(nextkey) && walkingPredicate.apply(nextkey)) || stillLaning) && (found == null));
+                
+                exitCondition = ((!Strings.isNullOrEmpty(nextkey) && walkingPredicate
+                    .apply(nextkey)) || stillLaning) && (found == null);
+                
+                if (LOG.isTraceEnabled()) {
+                    LOG.trace("seek()::plain case - --- iteration: {}", iteration);
+                    LOG.trace("seek()::plain case - retries: {},  MAX_RETRIES: {}", retries,
+                        MAX_RETRIES);
+                    LOG.trace("seek()::plain case - lane: {}", lane);
+                    LOG.trace("seek()::plain case - currentKey: {}", currentKey);
+                    LOG.trace("seek()::plain case - nextkey: {}", nextkey);
+                    LOG.trace("seek()::plain case - condition.apply(nextkey): {}",
+                        condition.apply(nextkey));
+                    LOG.trace("seek()::plain case - found: {}", found);
+                    LOG.trace("seek()::plain case - !Strings.isNullOrEmpty(nextkey): {}",
+                        !Strings.isNullOrEmpty(nextkey));
+                    LOG.trace("seek()::plain case - walkingPredicate.apply(nextkey): {}",
+                        walkingPredicate.apply(nextkey));
+                    LOG.trace("seek()::plain case - stillLaning: {}", stillLaning);
+                    LOG.trace(
+                        "seek()::plain case - While Condition: {}",
+                        exitCondition);
+                }
+            } while (exitCondition);
         }
         
         return found;
+    }
+    
+    /**
+     * ensure that the provided {@code next} actually exists as node. Attempt to clean it up
+     * otherwise.
+     * 
+     * @param index the {@code :index} node
+     * @param next the {@code :next} retrieved for the provided lane
+     * @param current the current node from which {@code :next} has been retrieved
+     * @param lane the lane on which we're looking into
+     * @return true if the node exists, false otherwise
+     */
+    private static boolean ensureAndCleanNode(@Nonnull final NodeBuilder index, 
+                                              @Nonnull final String next,
+                                              @Nonnull final String current,
+                                              final int lane,
+                                              @Nullable DanglingLinkCallback callback) {
+        checkNotNull(index);
+        checkNotNull(next);
+        checkNotNull(current);
+        checkArgument(lane < LANES && lane >= 0, "The lane must be between 0 and LANES");
+        
+        if (index.getChildNode(next).exists()) {
+            return true;
+        } else {
+            if (callback != null) {
+                callback.perform(current, next, lane);
+            }
+            return false;
+        }
     }
     
     /**
@@ -854,7 +1039,6 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
      * {@code searchfor}
      */
     static class PredicateGreaterThan implements Predicate<String> {
-        private String searchforEncoded;
         private String searchforDecoded;
         private boolean include;
         
@@ -863,7 +1047,6 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
         }
         
         public PredicateGreaterThan(@Nonnull String searchfor, boolean include) {
-            this.searchforEncoded = encode(searchfor);
             this.searchforDecoded = searchfor;
             this.include = include;
         }
@@ -873,8 +1056,8 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
             boolean b = false;
             if (!Strings.isNullOrEmpty(arg0)) {
                 String name = arg0;
-                b = searchforEncoded.compareTo(name) < 0 || (include && searchforEncoded
-                        .equals(name));
+                b = searchforDecoded.compareTo(name) < 0 || 
+                    (include && searchforDecoded.equals(name));
             }
             
             return b;
@@ -890,7 +1073,6 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
      * evaluates when the current element is less than (<) and less than equal {@code searchfor}
      */
     static class PredicateLessThan implements Predicate<String> {
-        private String searchforEncoded;
         private String searchforOriginal;
         private boolean include;
 
@@ -899,7 +1081,6 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
         }
 
         public PredicateLessThan(@Nonnull String searchfor, boolean include) {
-            this.searchforEncoded = encode(searchfor);
             this.searchforOriginal = searchfor;
             this.include = include;
         }
@@ -909,10 +1090,10 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
             boolean b = false;
             if (!Strings.isNullOrEmpty(arg0)) {
                 String name = arg0;
-                b = searchforEncoded.compareTo(name) > 0
-                    || (include && searchforEncoded.equals(name));
+                b = searchforOriginal.compareTo(name) > 0
+                    || (include && searchforOriginal.equals(name));
             }
-
+            
             return b;
         }
         
@@ -1011,12 +1192,18 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
      */
     static void setPropertyNext(@Nonnull final NodeBuilder node, final String... next) {
         if (node != null && next != null) {
-            String n1 = (next.length > 0) ? next[0] : "";
-            String n2 = (next.length > 1) ? next[1] : "";
-            String n3 = (next.length > 2) ? next[2] : "";
-            String n4 = (next.length > 3) ? next[3] : "";
-            
-            node.setProperty(NEXT, ImmutableList.of(n1, n2, n3, n4), Type.STRINGS);
+            int len = next.length - 1;
+            for (; len >= 0; len--) {
+                if (next[len].length() != 0) {
+                    break;
+                }
+            }
+            len++;
+            List<String> list = new ArrayList<String>(len);
+            for (int i = 0; i < len; i++) {
+                list.add(next[i]);
+            }
+            node.setProperty(NEXT, list, Type.STRINGS);
         }
     }
     
@@ -1028,7 +1215,7 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
      * @param value
      * @param lane
      */
-    static void setPropertyNext(@Nonnull final NodeBuilder node, 
+    public static void setPropertyNext(@Nonnull final NodeBuilder node, 
                                 final String value, final int lane) {
         if (node != null && value != null && lane >= 0 && lane < OrderedIndex.LANES) {
             PropertyState next = node.getProperty(NEXT);
@@ -1041,10 +1228,10 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
                         // content
                         LOG.debug("topping-up the number of lanes.");
                         List<String> vv = Lists.newArrayList(values);
-                        for (int i = vv.size(); i <= OrderedIndex.LANES; i++) {
+                        for (int i = vv.size(); i < OrderedIndex.LANES; i++) {
                             vv.add("");
                         }
-                        values = vv.toArray(new String[0]);
+                        values = vv.toArray(new String[vv.size()]);
                     }
                 } else {
                     values = Iterables.toArray(EMPTY_NEXT, String.class);
@@ -1076,21 +1263,24 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
     /**
      * short-cut for using NodeBuilder. See {@code getNext(NodeState)}
      */
-    static String getPropertyNext(@Nonnull final NodeBuilder node) {
+    public static String getPropertyNext(@Nonnull final NodeBuilder node) {
         return getPropertyNext(node, 0);
     }
 
     /**
      * short-cut for using NodeBuilder. See {@code getNext(NodeState)}
      */
-    static String getPropertyNext(@Nonnull final NodeBuilder node, final int lane) {
+    public static String getPropertyNext(@Nonnull final NodeBuilder node, final int lane) {
         checkNotNull(node);
         
         String next = "";
         PropertyState ps = node.getProperty(NEXT);
         if (ps != null) {
             if (ps.isArray()) {
-                next = ps.getValue(Type.STRING, Math.min(ps.count() - 1, lane));
+                int count = ps.count();
+                if (count > 0 && count > lane) {
+                    next = ps.getValue(Type.STRING, lane);
+                }
             } else {
                 next = ps.getValue(Type.STRING);
             }
@@ -1122,7 +1312,7 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
      * @param rnd the Random generator to be used for probability
      * @return the lane to be updated. 
      */
-    int getLane(@Nonnull final Random rnd) {
+    protected int getLane(@Nonnull final Random rnd) {
         final int maxLanes = OrderedIndex.LANES - 1;
         int lane = 0;
         
@@ -1131,5 +1321,65 @@ public class OrderedContentMirrorStoreStrategy extends ContentMirrorStoreStrateg
         }
         
         return lane;
+    }
+    
+    /**
+     * implementors of this interface will deal with the dangling link cases along the list
+     * (OAK-2077)
+     */
+    interface DanglingLinkCallback {
+        /**
+         * perform the required operation on the provided {@code current} node for the {@code next}
+         * value on {@code lane}
+         * 
+         * @param current the current node with the dangling link
+         * @param next the value pointing to the missing node
+         * @param lane the lane on which the link is on
+         */
+        void perform(String current, String next, int lane);
+    }
+    
+    /**
+     * implements a "Read-only" version for managing the dangling links which will simply track down
+     * in logs the presence of it
+     */
+    static class LoggingDanglinLinkCallback implements DanglingLinkCallback {
+        private boolean alreadyLogged;
+        
+        @Override
+        public void perform(@Nonnull final String current, 
+                            @Nonnull final String next, 
+                            int lane) {
+            checkNotNull(next);
+            checkNotNull(current);
+            checkArgument(lane < LANES && lane >= 0, "The lane must be between 0 and LANES");
+
+            if (!alreadyLogged) {
+                LOG.warn(
+                    "Dangling link to '{}' found on lane '{}' for key '{}'. Trying to clean it up. You may consider a reindex",
+                    new Object[] { next, lane, current });
+                alreadyLogged = true;
+            }
+        }
+    }
+    
+    static class FixingDanglingLinkCallback extends LoggingDanglinLinkCallback {
+        private final NodeBuilder indexContent;
+        
+        public FixingDanglingLinkCallback(@Nonnull final NodeBuilder indexContent) {
+            this.indexContent = checkNotNull(indexContent);
+        }
+
+        @Override
+        public void perform(String current, String next, int lane) {
+            super.perform(current, next, lane);
+            // as we're already pointing to nowhere it's safe to truncate here and avoid
+            // future errors. We'll fix all the lanes from slowest to fastest starting from the lane
+            // with the error. This should keep the list a bit more consistent with what is
+            // expected.
+            for (int l = lane; l < LANES; l++) {
+                setPropertyNext(indexContent.getChildNode(current), "", lane);                
+            }
+        }
     }
 }

@@ -18,6 +18,12 @@
  */
 package org.apache.jackrabbit.oak.plugins.document;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.jackrabbit.oak.commons.PropertiesUtil.toBoolean;
+import static org.apache.jackrabbit.oak.commons.PropertiesUtil.toInteger;
+import static org.apache.jackrabbit.oak.commons.PropertiesUtil.toLong;
+import static org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardUtils.registerMBean;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Dictionary;
@@ -42,15 +48,14 @@ import org.apache.felix.scr.annotations.Reference;
 import org.apache.felix.scr.annotations.ReferenceCardinality;
 import org.apache.felix.scr.annotations.ReferencePolicy;
 import org.apache.jackrabbit.oak.api.jmx.CacheStatsMBean;
+import org.apache.jackrabbit.oak.api.jmx.CheckpointMBean;
 import org.apache.jackrabbit.oak.commons.PropertiesUtil;
-import org.apache.jackrabbit.oak.kernel.KernelNodeStore;
 import org.apache.jackrabbit.oak.osgi.ObserverTracker;
 import org.apache.jackrabbit.oak.osgi.OsgiWhiteboard;
 import org.apache.jackrabbit.oak.plugins.blob.BlobGC;
 import org.apache.jackrabbit.oak.plugins.blob.BlobGCMBean;
 import org.apache.jackrabbit.oak.plugins.blob.BlobGarbageCollector;
 import org.apache.jackrabbit.oak.plugins.document.cache.CachingDocumentStore;
-import org.apache.jackrabbit.oak.plugins.document.rdb.RDBDataSourceFactory;
 import org.apache.jackrabbit.oak.plugins.document.util.MongoConnection;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 import org.apache.jackrabbit.oak.spi.blob.GarbageCollectableBlobStore;
@@ -67,12 +72,6 @@ import org.osgi.service.component.ComponentContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import static com.google.common.base.Preconditions.checkNotNull;
-import static org.apache.jackrabbit.oak.commons.PropertiesUtil.toBoolean;
-import static org.apache.jackrabbit.oak.commons.PropertiesUtil.toInteger;
-import static org.apache.jackrabbit.oak.commons.PropertiesUtil.toLong;
-import static org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardUtils.registerMBean;
-
 /**
  * The OSGi service to start/stop a DocumentNodeStore instance.
  */
@@ -82,7 +81,9 @@ public class DocumentNodeStoreService {
     private static final int DEFAULT_CACHE = 256;
     private static final int DEFAULT_OFF_HEAP_CACHE = 0;
     private static final int DEFAULT_CHANGES_SIZE = 256;
+    private static final int DEFAULT_BLOB_CACHE_SIZE = 16;
     private static final String DEFAULT_DB = "oak";
+    private static final String DEFAULT_PERSISTENT_CACHE = "";
     private static final String PREFIX = "oak.documentstore.";
 
     /**
@@ -95,11 +96,6 @@ public class DocumentNodeStoreService {
      * to use
      */
     private static final String FWK_PROP_DB = "oak.mongo.db";
-
-    //DocumentMK would be done away with so better not
-    //to expose this setting in config ui
-    @Property(boolValue = false, propertyPrivate = true)
-    private static final String PROP_USE_MK = "useMK";
 
     @Property(value = DEFAULT_URI)
     private static final String PROP_URI = "mongouri";
@@ -115,6 +111,12 @@ public class DocumentNodeStoreService {
 
     @Property(intValue =  DEFAULT_CHANGES_SIZE)
     private static final String PROP_CHANGES_SIZE = "changesSize";
+
+    @Property(intValue =  DEFAULT_BLOB_CACHE_SIZE)
+    private static final String PROP_BLOB_CACHE_SIZE = "blobCacheSize";
+    
+    @Property(value =  DEFAULT_PERSISTENT_CACHE)
+    private static final String PROP_PERSISTENT_CACHE = "persistentCache";
 
     /**
      * Boolean value indicating a blobStore is to be used
@@ -180,7 +182,7 @@ public class DocumentNodeStoreService {
     /**
      * Blob modified before this time duration would be considered for Blob GC
      */
-    private static final long DEFAULT_BLOB_GC_MAX_AGE = TimeUnit.HOURS.toMillis(24);
+    private static final long DEFAULT_BLOB_GC_MAX_AGE = TimeUnit.HOURS.toSeconds(24);
     public static final String PROP_BLOB_GC_MAX_AGE = "blobGcMaxAgeInSecs";
     private long blobGcMaxAgeInSecs = DEFAULT_BLOB_GC_MAX_AGE;
 
@@ -234,12 +236,17 @@ public class DocumentNodeStoreService {
         int offHeapCache = toInteger(prop(PROP_OFF_HEAP_CACHE), DEFAULT_OFF_HEAP_CACHE);
         int cacheSize = toInteger(prop(PROP_CACHE), DEFAULT_CACHE);
         int changesSize = toInteger(prop(PROP_CHANGES_SIZE), DEFAULT_CHANGES_SIZE);
-        boolean useMK = toBoolean(context.getProperties().get(PROP_USE_MK), false);
+        int blobCacheSize = toInteger(prop(PROP_BLOB_CACHE_SIZE), DEFAULT_BLOB_CACHE_SIZE);
+        String persistentCache = PropertiesUtil.toString(prop(PROP_PERSISTENT_CACHE), DEFAULT_PERSISTENT_CACHE);
 
         DocumentMK.Builder mkBuilder =
                 new DocumentMK.Builder().
                 memoryCacheSize(cacheSize * MB).
                 offHeapCacheSize(offHeapCache * MB);
+        
+        if (persistentCache != null && persistentCache.length() > 0) {
+            mkBuilder.setPersistentCache(persistentCache);
+        }
 
         //Set blobstore before setting the DB
         if (customBlobStore) {
@@ -248,42 +255,7 @@ public class DocumentNodeStoreService {
             mkBuilder.setBlobStore(blobStore);
         }
 
-        String jdbcuri = System.getProperty("oak.jdbc.connection.uri", "");
-
-        if (!jdbcuri.isEmpty()) {
-            // OAK-1708 - this is temporary until we figure out parameterization,
-            // and how to pass in DataSources directly
-            String dsusername = System.getProperty("oak.jdbc.username", "");
-            String dspasswd = System.getProperty("oak.jdbc.password", "");
-            String dsdriver = System.getProperty("oak.jdbc.driver.class", "");
-
-            String bsjdbcuri = System.getProperty("oakbs.jdbc.connection.uri", "");
-            String bsusername = System.getProperty("oakbs.jdbc.username", "");
-            String bspasswd = System.getProperty("oakbs.jdbc.password", "");
-            String bsdriver = System.getProperty("oakbs.jdbc.driver.class", "");
-
-            // document store
-            if (dsdriver.length() == 0) {
-                log.info("System property oak.jdbc.driver.class not set.");
-            }
-
-            if (log.isInfoEnabled()) {
-                String type = useMK ? "MK" : "NodeStore";
-                log.info(
-                        "Starting Document{} with uri(s)={}{}, cache size (MB)={}, Off Heap Cache size (MB)={}, 'changes' collection size (MB)={}",
-                        type, jdbcuri, bsjdbcuri, cacheSize, offHeapCache, changesSize);
-            }
-
-            DataSource ds = RDBDataSourceFactory.forJdbcUrl(jdbcuri, dsusername, dspasswd, dsdriver);
-            if (bsjdbcuri.length() == 0) {
-                mkBuilder.setRDBConnection(ds);
-                log.info("Connected to datasource {}", ds);
-            } else {
-                DataSource dsbs = RDBDataSourceFactory.forJdbcUrl(bsjdbcuri, bsusername, bspasswd, bsdriver);
-                mkBuilder.setRDBConnection(ds, dsbs);
-                log.info("Connected to datasources {} {}", ds, dsbs);
-            }
-        } else if (documentStoreType == DocumentStoreType.RDB){
+        if (documentStoreType == DocumentStoreType.RDB){
             checkNotNull(dataSource, "DataStore type set [%s] but DataSource reference not initialized", PROP_DS_TYPE);
             if(customBlobDataSource){
                 checkNotNull(blobDataSource, "DataStore type set [%s] and BlobStore is configured to use different " +
@@ -301,10 +273,9 @@ public class DocumentNodeStoreService {
             if (log.isInfoEnabled()) {
                 // Take care around not logging the uri directly as it
                 // might contain passwords
-                String type = useMK ? "MK" : "NodeStore";
-                log.info("Starting Document{} with host={}, db={}, cache size (MB)={}, Off Heap Cache size (MB)={}, " +
-                                "'changes' collection size (MB)={}, maxReplicationLagInSecs={}",
-                        type, mongoURI.getHosts(), db, cacheSize, offHeapCache, changesSize, maxReplicationLagInSecs);
+                log.info("Starting DocumentNodeStore with host={}, db={}, cache size (MB)={}, Off Heap Cache size (MB)={}, " +
+                                "'changes' collection size (MB)={}, blobCacheSize (MB)={}, maxReplicationLagInSecs={}",
+                        mongoURI.getHosts(), db, cacheSize, offHeapCache, changesSize, blobCacheSize, maxReplicationLagInSecs);
                 log.info("Mongo Connection details {}", MongoConnection.toString(mongoURI.getOptions()));
             }
 
@@ -312,7 +283,7 @@ public class DocumentNodeStoreService {
             DB mongoDB = client.getDB(db);
 
             mkBuilder.setMaxReplicationLag(maxReplicationLagInSecs, TimeUnit.SECONDS);
-            mkBuilder.setMongoDB(mongoDB, changesSize);
+            mkBuilder.setMongoDB(mongoDB, changesSize, blobCacheSize);
 
             log.info("Connected to database {}", mongoDB);
         }
@@ -324,15 +295,9 @@ public class DocumentNodeStoreService {
         registerLastRevRecoveryJob(mk.getNodeStore());
 
         NodeStore store;
-        if (useMK) {
-            KernelNodeStore kns = new KernelNodeStore(mk);
-            store = kns;
-            observerTracker = new ObserverTracker(kns);
-        } else {
-            DocumentNodeStore mns = mk.getNodeStore();
-            store = mns;
-            observerTracker = new ObserverTracker(mns);
-        }
+        DocumentNodeStore mns = mk.getNodeStore();
+        store = mns;
+        observerTracker = new ObserverTracker(mns);
 
         observerTracker.start(context.getBundleContext());
 
@@ -436,6 +401,22 @@ public class DocumentNodeStoreService {
                         CacheStatsMBean.TYPE,
                         store.getDocChildrenCacheStats().getName())
         );
+        registrations.add(
+                registerMBean(whiteboard,
+                        CheckpointMBean.class,
+                        new DocumentCheckpointMBean(store),
+                        CheckpointMBean.TYPE,
+                        "Document node store checkpoint management")
+        );
+
+        registrations.add(
+                registerMBean(whiteboard,
+                        DocumentNodeStoreMBean.class,
+                        store.getMBean(),
+                        DocumentNodeStoreMBean.TYPE,
+                        "Document node store management")
+        );
+
         DiffCache cl = store.getDiffCache();
         if (cl instanceof MemoryDiffCache) {
             MemoryDiffCache mcl = (MemoryDiffCache) cl;

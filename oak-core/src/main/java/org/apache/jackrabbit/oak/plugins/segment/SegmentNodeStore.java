@@ -22,20 +22,25 @@ import static java.lang.System.currentTimeMillis;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.apache.jackrabbit.oak.api.Type.STRING;
 import static org.apache.jackrabbit.oak.plugins.segment.Record.fastEquals;
 
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Collections;
+import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Random;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicReference;
 
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 
+import com.google.common.collect.Maps;
 import org.apache.jackrabbit.oak.api.Blob;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.PropertyState;
@@ -51,10 +56,23 @@ import org.apache.jackrabbit.oak.spi.state.ConflictAnnotatingRebaseDiff;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+/**
+ * The top level class for the segment store.
+ * <p>
+ * The root node of the JCR content tree is actually stored in the node "/root",
+ * and checkpoints are stored under "/checkpoints".
+ */
 public class SegmentNodeStore implements NodeStore, Observable {
 
+    private static final Logger log = LoggerFactory
+            .getLogger(SegmentNodeStore.class);
+
     static final String ROOT = "root";
+
+    public static final String CHECKPOINTS = "checkpoints";
 
     private final SegmentStore store;
 
@@ -86,6 +104,17 @@ public class SegmentNodeStore implements NodeStore, Observable {
 
     void setMaximumBackoff(long max) {
         this.maximumBackoff = max;
+    }
+
+    boolean locked(Callable<Boolean> c) throws Exception {
+        if (commitSemaphore.tryAcquire()) {
+            try {
+                return c.call();
+            } finally {
+                commitSemaphore.release();
+            }
+        }
+        return false;
     }
 
     /**
@@ -120,7 +149,7 @@ public class SegmentNodeStore implements NodeStore, Observable {
     @Override
     public NodeState merge(
             @Nonnull NodeBuilder builder, @Nonnull CommitHook commitHook,
-            @Nullable CommitInfo info) throws CommitFailedException {
+            @Nonnull CommitInfo info) throws CommitFailedException {
         checkArgument(builder instanceof SegmentNodeBuilder);
         checkNotNull(commitHook);
 
@@ -139,6 +168,9 @@ public class SegmentNodeStore implements NodeStore, Observable {
         } catch (InterruptedException e) {
             throw new CommitFailedException(
                     "Segment", 2, "Merge interrupted", e);
+        } catch (SegmentOverflowException e) {
+            throw new CommitFailedException(
+                    "Segment", 3, "Merge failed", e);
         }
     }
 
@@ -149,7 +181,7 @@ public class SegmentNodeStore implements NodeStore, Observable {
         SegmentNodeBuilder snb = (SegmentNodeBuilder) builder;
 
         NodeState root = getRoot();
-        SegmentNodeState before = snb.getBaseState();
+        NodeState before = snb.getBaseState();
         if (!fastEquals(before, root)) {
             SegmentNodeState after = snb.getNodeState();
             snb.reset(root);
@@ -195,9 +227,11 @@ public class SegmentNodeStore implements NodeStore, Observable {
                 "without specifying BlobStore");
     }
 
-    @Override @Nonnull
-    public synchronized String checkpoint(long lifetime) {
+    @Nonnull
+    @Override
+    public String checkpoint(long lifetime, @Nonnull Map<String, String> properties) {
         checkArgument(lifetime > 0);
+        checkNotNull(properties);
         String name = UUID.randomUUID().toString();
         long now = System.currentTimeMillis();
 
@@ -223,12 +257,23 @@ public class SegmentNodeStore implements NodeStore, Observable {
 
                     NodeBuilder cp = checkpoints.child(name);
                     cp.setProperty("timestamp",  now + lifetime);
+                    cp.setProperty("created", now);
+
+                    NodeBuilder props = cp.setChildNode("properties");
+                    for (Entry<String, String> p : properties.entrySet()) {
+                        props.setProperty(p.getKey(), p.getValue());
+                    }
+
                     cp.setChildNode(ROOT, state.getChildNode(ROOT));
 
                     SegmentNodeState newState = builder.getNodeState();
                     if (store.setHead(state, newState)) {
                         refreshHead();
                         return name;
+                    } else {
+                        log.debug(
+                                "Unable to update the head state for checkpoint {} ({}/5)",
+                                new Object[] { name, i + 1 });
                     }
 
                 } finally {
@@ -237,7 +282,30 @@ public class SegmentNodeStore implements NodeStore, Observable {
             }
         }
 
+        log.debug("Failed to create checkpoint {}", name);
         return name;
+    }
+
+    @Override @Nonnull
+    public synchronized String checkpoint(long lifetime) {
+        return checkpoint(lifetime, Collections.<String, String>emptyMap());
+    }
+
+    @Nonnull
+    @Override
+    public Map<String, String> checkpointInfo(@Nonnull String checkpoint) {
+        Map<String, String> properties = Maps.newHashMap();
+        checkNotNull(checkpoint);
+        NodeState cp = head.get()
+                .getChildNode("checkpoints")
+                .getChildNode(checkpoint)
+                .getChildNode("properties");
+
+        for (PropertyState prop : cp.getProperties()) {
+            properties.put(prop.getName(), prop.getValue(STRING));
+        }
+
+        return properties;
     }
 
     @Override @CheckForNull
@@ -254,7 +322,7 @@ public class SegmentNodeStore implements NodeStore, Observable {
     }
 
     @Override
-    public void release(@Nonnull String checkpoint) {
+    public boolean release(@Nonnull String checkpoint) {
         checkNotNull(checkpoint);
 
         // try 5 times
@@ -270,27 +338,31 @@ public class SegmentNodeStore implements NodeStore, Observable {
                             checkpoint);
                     if (cp.exists()) {
                         cp.remove();
+                        SegmentNodeState newState = builder.getNodeState();
+                        if (store.setHead(state, newState)) {
+                            refreshHead();
+                            return true;
+                        }
                     }
-                    SegmentNodeState newState = builder.getNodeState();
-                    if (store.setHead(state, newState)) {
-                        refreshHead();
-                        return;
-                    }
-
                 } finally {
                     commitSemaphore.release();
                 }
             }
         }
+        return false;
+    }
+
+    NodeState getCheckpoints() {
+        return head.get().getChildNode(CHECKPOINTS);
     }
 
     private class Commit {
 
         private final Random random = new Random();
 
-        private SegmentNodeState before;
+        private final NodeState before;
 
-        private SegmentNodeState after;
+        private final SegmentNodeState after;
 
         private final CommitHook hook;
 
@@ -306,10 +378,7 @@ public class SegmentNodeStore implements NodeStore, Observable {
             this.info = checkNotNull(info);
         }
 
-        private boolean setHead(SegmentNodeBuilder builder) {
-            SegmentNodeState before = builder.getBaseState();
-            SegmentNodeState after = builder.getNodeState();
-
+        private boolean setHead(SegmentNodeState before, SegmentNodeState after) {
             refreshHead();
             if (store.setHead(before, after)) {
                 head.set(after);
@@ -321,8 +390,7 @@ public class SegmentNodeStore implements NodeStore, Observable {
             }
         }
 
-        private SegmentNodeBuilder prepare() throws CommitFailedException {
-            SegmentNodeState state = head.get();
+        private SegmentNodeBuilder prepare(SegmentNodeState state) throws CommitFailedException {
             SegmentNodeBuilder builder = state.builder();
             if (fastEquals(before, state.getChildNode(ROOT))) {
                 // use a shortcut when there are no external changes
@@ -357,9 +425,9 @@ public class SegmentNodeStore implements NodeStore, Observable {
                     // someone else has a pessimistic lock on the journal,
                     // so we should not try to commit anything yet
                 } else {
-                    SegmentNodeBuilder builder = prepare();
+                    SegmentNodeBuilder builder = prepare(state);
                     // use optimistic locking to update the journal
-                    if (setHead(builder)) {
+                    if (setHead(state, builder.getNodeState())) {
                         return -1;
                     }
                 }
@@ -393,14 +461,14 @@ public class SegmentNodeStore implements NodeStore, Observable {
                     builder.setProperty("token", UUID.randomUUID().toString());
                     builder.setProperty("timeout", now + timeout);
 
-                    if (setHead(builder)) {
+                    if (setHead(state, builder.getNodeState())) {
                          // lock acquired; rebase, apply commit hooks, and unlock
-                        builder = prepare();
+                        builder = prepare(state);
                         builder.removeProperty("token");
                         builder.removeProperty("timeout");
 
                         // complete the commit
-                        if (setHead(builder)) {
+                        if (setHead(state, builder.getNodeState())) {
                             return;
                         }
                     }

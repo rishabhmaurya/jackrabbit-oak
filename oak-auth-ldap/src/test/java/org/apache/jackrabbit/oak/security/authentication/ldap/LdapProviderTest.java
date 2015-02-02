@@ -109,9 +109,9 @@ public class LdapProviderTest {
                 .setBaseDN(ServerDNConstants.GROUPS_SYSTEM_DN)
                 .setObjectClasses("groupOfUniqueNames");
 
-        LdapIdentityProvider ldapIDP = new LdapIdentityProvider(providerConfig);
-        ldapIDP.disableConnectionPooling = true;
-        return ldapIDP;
+        providerConfig.getAdminPoolConfig().setMaxActive(0);
+        providerConfig.getUserPoolConfig().setMaxActive(0);
+        return new LdapIdentityProvider(providerConfig);
     }
 
     protected static void initLdapFixture(InternalLdapServer server) throws Exception {
@@ -167,6 +167,14 @@ public class LdapProviderTest {
     @Test
     public void testAuthenticate() throws Exception {
         SimpleCredentials creds = new SimpleCredentials(TEST_USER1_UID, "pass".toCharArray());
+        ExternalUser user = idp.authenticate(creds);
+        assertNotNull("User 1 must authenticate", user);
+        assertEquals("User Ref", TEST_USER1_DN, user.getExternalId().getId());
+    }
+
+    @Test
+    public void testAuthenticateCaseInsensitive() throws Exception {
+        SimpleCredentials creds = new SimpleCredentials(TEST_USER1_UID.toUpperCase(), "pass".toCharArray());
         ExternalUser user = idp.authenticate(creds);
         assertNotNull("User 1 must authenticate", user);
         assertEquals("User Ref", TEST_USER1_DN, user.getExternalId().getId());

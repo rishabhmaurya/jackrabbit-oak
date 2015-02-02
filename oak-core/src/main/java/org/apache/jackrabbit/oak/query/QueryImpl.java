@@ -62,6 +62,7 @@ import org.apache.jackrabbit.oak.query.ast.SameNodeJoinConditionImpl;
 import org.apache.jackrabbit.oak.query.ast.SelectorImpl;
 import org.apache.jackrabbit.oak.query.ast.SimilarImpl;
 import org.apache.jackrabbit.oak.query.ast.SourceImpl;
+import org.apache.jackrabbit.oak.query.ast.SpellcheckImpl;
 import org.apache.jackrabbit.oak.query.ast.UpperCaseImpl;
 import org.apache.jackrabbit.oak.query.index.FilterImpl;
 import org.apache.jackrabbit.oak.query.index.TraversingIndex;
@@ -76,6 +77,7 @@ import org.apache.jackrabbit.oak.spi.query.QueryIndex.OrderEntry;
 import org.apache.jackrabbit.oak.spi.query.QueryIndex.OrderEntry.Order;
 import org.apache.jackrabbit.oak.spi.query.QueryIndexProvider;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
+import org.apache.jackrabbit.oak.spi.state.NodeStateUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -99,6 +101,11 @@ public class QueryImpl implements Query {
      * The "rep:excerpt" pseudo-property.
      */
     public static final String REP_EXCERPT = "rep:excerpt";
+
+    /**
+     * The "rep:spellcheck" pseudo-property.
+     */
+    public static final String REP_SPELLCHECK = "rep:spellcheck()";
 
     private static final Logger LOG = LoggerFactory.getLogger(QueryImpl.class);
 
@@ -138,6 +145,10 @@ public class QueryImpl implements Query {
     private double estimatedCost;
 
     private final QueryEngineSettings settings;
+
+    private boolean warnedHidden;
+
+    private boolean isInternal;
 
     QueryImpl(String statement, SourceImpl source, ConstraintImpl constraint,
             ColumnImpl[] columns, NamePathMapper mapper, QueryEngineSettings settings) {
@@ -227,6 +238,13 @@ public class QueryImpl implements Query {
             
             @Override
             public boolean visit(SimilarImpl node) {
+                node.setQuery(query);
+                node.bindSelector(source);
+                return super.visit(node);
+            }
+            
+            @Override
+            public boolean visit(SpellcheckImpl node) {
                 node.setQuery(query);
                 node.bindSelector(source);
                 return super.visit(node);
@@ -434,12 +452,13 @@ public class QueryImpl implements Query {
             return Arrays.asList(r).iterator();
         }
         if (LOG.isDebugEnabled()) {
-            LOG.debug("query execute {} ", statement);
-            LOG.debug("query plan {}", getPlan());
+            logDebug("query execute " + statement);
+            logDebug("query plan " + getPlan());
         }
         RowIterator rowIt = new RowIterator(context.getBaseState());
         Comparator<ResultRowImpl> orderBy;
         boolean sortUsingIndex = false;
+        // TODO add issue about order by optimization for multiple selectors
         if (orderings != null && selectors.size() == 1) {
             IndexPlan plan = selectors.get(0).getExecutionPlan().getIndexPlan();
             if (plan != null) {
@@ -635,6 +654,11 @@ public class QueryImpl implements Query {
                         rowIndex++;
                         break;
                     }
+                    if (constraint != null && constraint.evaluateStop()) {
+                        current = null;
+                        end = true;
+                        break;
+                    }
                 } else {
                     current = null;
                     end = true;
@@ -762,7 +786,7 @@ public class QueryImpl implements Query {
             QueryIndexProvider indexProvider, boolean traversalEnabled) {
         QueryIndex bestIndex = null;
         if (LOG.isDebugEnabled()) {
-            LOG.debug("cost using filter " + filter);
+            logDebug("cost using filter " + filter);
         }
 
         double bestCost = Double.POSITIVE_INFINITY;
@@ -811,6 +835,7 @@ public class QueryImpl implements Query {
                         filter, sortOrder, rootState);
                 cost = Double.POSITIVE_INFINITY;
                 for (IndexPlan p : ipList) {
+                    // TODO limit is after all conditions
                     long entryCount = Math.min(maxEntryCount, p.getEstimatedEntryCount());
                     double c = p.getCostPerExecution() + entryCount * p.getCostPerEntry();
                     if (c < cost) {
@@ -822,7 +847,7 @@ public class QueryImpl implements Query {
                 cost = index.getCost(filter, rootState);
             }
             if (LOG.isDebugEnabled()) {
-                LOG.debug("cost for " + index.getIndexName() + " is " + cost);
+                logDebug("cost for " + index.getIndexName() + " is " + cost);
             }
             if (cost < 0) {
                 LOG.error("cost below 0 for " + index.getIndexName() + " is " + cost);
@@ -838,7 +863,7 @@ public class QueryImpl implements Query {
             QueryIndex traversal = new TraversingIndex();
             double cost = traversal.getCost(filter, rootState);
             if (LOG.isDebugEnabled()) {
-                LOG.debug("cost for " + traversal.getIndexName() + " is " + cost);
+                logDebug("cost for " + traversal.getIndexName() + " is " + cost);
             }
             if (cost < bestCost || bestCost == Double.POSITIVE_INFINITY) {
                 bestCost = cost;
@@ -847,6 +872,14 @@ public class QueryImpl implements Query {
             }
         }
         return new SelectorExecutionPlan(filter.getSelector(), bestIndex, bestPlan, bestCost);
+    }
+    
+    private void logDebug(String msg) {
+        if (isInternal) {
+            LOG.trace(msg);
+        } else {
+            LOG.debug(msg);
+        }
     }
 
     @Override
@@ -865,7 +898,19 @@ public class QueryImpl implements Query {
 
     @Override
     public Tree getTree(String path) {
+        if (NodeStateUtils.isHiddenPath(path)) {
+            if (!warnedHidden) {
+                warnedHidden = true;
+                LOG.warn("Hidden tree traversed: {}", path);
+            }
+            return null;
+        }
         return context.getRoot().getTree(path);
+    }
+
+    @Override
+    public boolean isMeasureOrExplainEnabled() {
+        return explain || measure;
     }
 
     /**
@@ -928,6 +973,11 @@ public class QueryImpl implements Query {
 
     public QueryEngineSettings getSettings() {
         return settings;
+    }
+    
+    @Override
+    public void setInternal(boolean isInternal) {
+        this.isInternal = isInternal;
     }
 
 }

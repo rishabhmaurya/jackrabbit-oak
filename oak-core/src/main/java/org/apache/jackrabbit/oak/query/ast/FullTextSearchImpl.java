@@ -30,6 +30,7 @@ import org.apache.jackrabbit.oak.api.PropertyValue;
 import org.apache.jackrabbit.oak.api.Tree;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.commons.PathUtils;
+import org.apache.jackrabbit.oak.query.fulltext.FullTextContains;
 import org.apache.jackrabbit.oak.query.fulltext.FullTextExpression;
 import org.apache.jackrabbit.oak.query.fulltext.FullTextParser;
 import org.apache.jackrabbit.oak.query.index.FilterImpl;
@@ -138,7 +139,9 @@ public class FullTextSearchImpl extends ConstraintImpl {
                 p = PathUtils.concat(relativePath, p);
             }
             String p2 = normalizePropertyName(p);
-            return FullTextParser.parse(p2, v.getValue(Type.STRING));
+            String rawText = v.getValue(Type.STRING);
+            FullTextExpression e = FullTextParser.parse(p2, rawText);
+            return new FullTextContains(p2, rawText, e);
         } catch (ParseException e) {
             throw new IllegalArgumentException("Invalid expression: " + fullTextSearchExpression, e);
         }
@@ -167,7 +170,10 @@ public class FullTextSearchImpl extends ConstraintImpl {
             }
             return true;
         }
-
+        // OAK-2050
+        if (!query.getSettings().getFullTextComparisonWithoutIndex()) {
+            return false;
+        }
         StringBuilder buff = new StringBuilder();
         if (relativePath == null && propertyName != null) {
             PropertyValue p = selector.currentProperty(propertyName);
@@ -207,13 +213,36 @@ public class FullTextSearchImpl extends ConstraintImpl {
         return getFullTextConstraint(selector).evaluate(buff.toString());
     }
     
+    @Override
+    public boolean evaluateStop() {
+        // if a fulltext index is used, then we are fine
+        if (selector.getIndex() instanceof FulltextQueryIndex) {
+            return false;
+        }
+        // OAK-2050
+        if (!query.getSettings().getFullTextComparisonWithoutIndex()) {
+            return true;
+        }
+        return false;
+    }
+
     private static void appendString(StringBuilder buff, PropertyValue p) {
         if (p.isArray()) {
-            for (String v : p.getValue(STRINGS)) {
-                buff.append(v).append(' ');
+            if (p.getType() == Type.BINARIES) {
+                // OAK-2050: don't try to load binaries as this would 
+                // run out of memory
+            } else {
+                for (String v : p.getValue(STRINGS)) {
+                    buff.append(v).append(' ');
+                }
             }
         } else {
-            buff.append(p.getValue(STRING)).append(' ');
+            if (p.getType() == Type.BINARY) {
+                // OAK-2050: don't try to load binaries as this would 
+                // run out of memory
+            } else {
+                buff.append(p.getValue(STRING)).append(' ');
+            }
         }
     }
 
@@ -225,8 +254,12 @@ public class FullTextSearchImpl extends ConstraintImpl {
     public void restrict(FilterImpl f) {
         if (propertyName != null) {
             if (f.getSelector().equals(selector)) {
-                String pn = normalizePropertyName(propertyName);
-                f.restrictProperty(pn, Operator.NOT_EQUAL, null);
+                String p = propertyName;
+                if (relativePath != null) {
+                    p = PathUtils.concat(p, relativePath);
+                }                
+                p = normalizePropertyName(p);
+                f.restrictProperty(p, Operator.NOT_EQUAL, null);
             }
         }
         f.restrictFulltextCondition(fullTextSearchExpression.currentValue().getValue(Type.STRING));

@@ -18,11 +18,13 @@ package org.apache.jackrabbit.oak.plugins.index.solr.server;
 
 import java.io.File;
 import java.io.IOException;
+import javax.annotation.CheckForNull;
 
 import org.apache.jackrabbit.oak.plugins.index.solr.configuration.RemoteSolrServerConfiguration;
 import org.apache.solr.client.solrj.SolrServer;
 import org.apache.solr.client.solrj.SolrServerException;
 import org.apache.solr.client.solrj.impl.CloudSolrServer;
+import org.apache.solr.client.solrj.impl.ConcurrentUpdateSolrServer;
 import org.apache.solr.client.solrj.impl.HttpSolrServer;
 import org.apache.solr.client.solrj.request.UpdateRequest;
 import org.apache.solr.client.solrj.response.SolrPingResponse;
@@ -47,6 +49,7 @@ public class RemoteSolrServerProvider implements SolrServerProvider {
         this.remoteSolrServerConfiguration = remoteSolrServerConfiguration;
     }
 
+    @CheckForNull
     @Override
     public SolrServer getSolrServer() throws Exception {
         if (solrServer == null && remoteSolrServerConfiguration.getSolrZkHost() != null && remoteSolrServerConfiguration.getSolrZkHost().length() > 0) {
@@ -70,6 +73,25 @@ public class RemoteSolrServerProvider implements SolrServerProvider {
         return solrServer;
     }
 
+    @CheckForNull
+    @Override
+    public SolrServer getIndexingSolrServer() throws Exception {
+        SolrServer server = getSolrServer();
+
+        if (server instanceof HttpSolrServer) {
+            String url = ((HttpSolrServer) server).getBaseURL();
+            server = new ConcurrentUpdateSolrServer(url, 1000, 4);
+        }
+
+        return server;
+    }
+
+    @CheckForNull
+    @Override
+    public SolrServer getSearchingSolrServer() throws Exception {
+        return getSolrServer();
+    }
+
     private SolrServer initializeWithExistingHttpServer() throws IOException, SolrServerException {
         // try basic Solr HTTP client
         HttpSolrServer httpSolrServer = new HttpSolrServer(remoteSolrServerConfiguration.getSolrHttpUrls()[0]);
@@ -82,7 +104,7 @@ public class RemoteSolrServerProvider implements SolrServerProvider {
 
     }
 
-    private SolrServer initializeWithCloudSolrServer() throws IOException, SolrServerException {
+    private SolrServer initializeWithCloudSolrServer() throws IOException {
         // try SolrCloud client
         CloudSolrServer cloudSolrServer = new CloudSolrServer(remoteSolrServerConfiguration.getSolrZkHost());
         cloudSolrServer.setZkConnectTimeout(100);
@@ -124,8 +146,7 @@ public class RemoteSolrServerProvider implements SolrServerProvider {
                 i++;
             }
             throw new IOException("the found SolrCloud server is not alive");
-        }
-        else {
+        } else {
             throw new IOException("could not connect to Zookeeper hosted at " + remoteSolrServerConfiguration.getSolrZkHost());
         }
 
@@ -150,7 +171,7 @@ public class RemoteSolrServerProvider implements SolrServerProvider {
         return connected;
     }
 
-    private void createCollectionIfNeeded(CloudSolrServer cloudSolrServer) throws SolrServerException, IOException {
+    private void createCollectionIfNeeded(CloudSolrServer cloudSolrServer) throws SolrServerException {
         String solrCollection = remoteSolrServerConfiguration.getSolrCollection();
         try {
             ZkStateReader zkStateReader = cloudSolrServer.getZkStateReader();

@@ -23,7 +23,7 @@ import static com.google.common.collect.Lists.newLinkedList;
 import static com.google.common.collect.Sets.newHashSet;
 import static org.apache.jackrabbit.oak.api.Type.NAMES;
 import static org.apache.jackrabbit.oak.api.Type.STRING;
-import static org.apache.jackrabbit.oak.plugins.tree.TreeConstants.OAK_CHILD_ORDER;
+import static org.apache.jackrabbit.oak.plugins.tree.impl.TreeConstants.OAK_CHILD_ORDER;
 import static org.apache.jackrabbit.oak.plugins.memory.EmptyNodeState.MISSING_NODE;
 import static org.apache.jackrabbit.oak.spi.state.MoveDetector.SOURCE_PATH;
 
@@ -36,6 +36,8 @@ import javax.annotation.Nonnull;
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStateDiff;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Continuation-based content diff implementation that generates
@@ -53,6 +55,7 @@ import org.apache.jackrabbit.oak.spi.state.NodeStateDiff;
  * </pre>
  */
 public class EventGenerator {
+    private static final Logger log = LoggerFactory.getLogger(EventGenerator.class);
 
     /**
      * Maximum number of content changes to process during the
@@ -68,7 +71,13 @@ public class EventGenerator {
      */
     private static final int MAX_QUEUED_CONTINUATIONS = 1000;
 
-    private final LinkedList<Runnable> continuations = newLinkedList();
+    private final LinkedList<Continuation> continuations = newLinkedList();
+
+    /**
+     * Creates a new generator instance. Changes to process need to be added
+     * through {@link #addHandler(NodeState, NodeState, EventHandler)}
+     */
+    public EventGenerator() {}
 
     /**
      * Creates a new generator instance for processing the given changes.
@@ -76,6 +85,10 @@ public class EventGenerator {
     public EventGenerator(
             @Nonnull NodeState before, @Nonnull NodeState after,
             @Nonnull EventHandler handler) {
+        continuations.addFirst(new Continuation(handler, before, after, 0));
+    }
+
+    public void addHandler(NodeState before, NodeState after, EventHandler handler) {
         continuations.addFirst(new Continuation(handler, before, after, 0));
     }
 
@@ -95,7 +108,15 @@ public class EventGenerator {
      */
     public void generate() {
         if (!continuations.isEmpty()) {
-            continuations.removeFirst().run();
+            final Continuation c = continuations.removeFirst();
+            if (log.isDebugEnabled()) {
+                log.debug("Starting event generation ...");
+                long start = System.currentTimeMillis();
+                c.run();
+                log.debug("Generated {} events in {} ms", c.counter, (System.currentTimeMillis() - start));
+            } else {
+                c.run();
+            }
         }
     }
 

@@ -94,6 +94,16 @@ versionGcMaxAgeInSecs
   content would only be marked deleted at revision for T1 but its content would not be removed. Only when a Revision
   GC is run then its content would removed and that too only after (currentTime -T1 > versionGcMaxAgeInSecs)
 
+blobCacheSize
+: Default 16 (MB)
+: DocumentNodeStore when running with Mongo would use `MongoBlobStore` by default unless a custom `BlobStore` is 
+  configured. In such scenario the size of in memory cache for the frequently used blobs can be configured via 
+  `blobCacheSize`. 
+  
+persistentCache
+: Default "" (an empty string, meaning disabled)
+: The persistent cache, which is stored in the local file system.
+
 Example config file
 
     mongouri=mongodb://localhost:27017
@@ -291,8 +301,8 @@ The following configuration items can be defined (e.g. through Apache Felix WebC
         #Solr replication factor, no. of replicas to be created for each shard (for each collection) with SolrCloud 
         solr.replication.factor = 2
         
-        #number of documents per 'page' to be fetched for each query 
-        solr.conf.dir = directory eventually containing the configuration files to be uploaded for creating the SolrCloud collection 
+        #directory eventually containing the configuration files to be uploaded for creating the SolrCloud collection 
+        solr.conf.dir =  
         
 3. Oak Solr embedded server configuration: Configuration for _EmbeddedSolrServerProvider_ service with the following parameters:
 

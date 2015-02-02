@@ -21,6 +21,7 @@ package org.apache.jackrabbit.oak.jcr.query;
 import static com.google.common.collect.Sets.newHashSet;
 import static junit.framework.Assert.assertEquals;
 import static junit.framework.Assert.assertTrue;
+import static org.apache.jackrabbit.JcrConstants.NT_FOLDER;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.fail;
 
@@ -65,6 +66,31 @@ public class QueryTest extends AbstractRepositoryTest {
     }
     
     @Test
+    public void noDeclaringNodeTypesIndex() throws Exception {
+        Session session = getAdminSession();
+        Node root = session.getRootNode();
+        
+        // set declaringNodeTypes to an empty array
+        Node nodeTypeIndex = root.getNode("oak:index").getNode("nodetype");
+        nodeTypeIndex.setProperty("declaringNodeTypes", new String[] {
+            }, PropertyType.NAME);
+        session.save();
+
+        // add a node
+        Node test = root.addNode("test");
+        test.addNode("testNode", "oak:Unstructured");
+        session.save();
+
+        // run the query
+        String query = "/jcr:root/test//*[@jcr:primaryType='oak:Unstructured']";
+        QueryResult r = session.getWorkspace().getQueryManager()
+                .createQuery(query, "xpath").execute();
+        NodeIterator it = r.getNodes();
+        assertTrue(it.hasNext());
+        assertEquals("/test/testNode", it.nextNode().getPath());
+    }
+    
+    @Test
     public void orderBy() throws Exception {
         Session session = getAdminSession();
         Node root = session.getRootNode();
@@ -81,7 +107,9 @@ public class QueryTest extends AbstractRepositoryTest {
         // disable the nodetype index
         Node nodeTypeIndex = root.getNode("oak:index").getNode("nodetype");
         nodeTypeIndex.setProperty("declaringNodeTypes", new String[] {
+                "nt:Folder"
             }, PropertyType.NAME);
+        session.save();
 
         // add 10 nodes
         Node test = root.addNode("test");

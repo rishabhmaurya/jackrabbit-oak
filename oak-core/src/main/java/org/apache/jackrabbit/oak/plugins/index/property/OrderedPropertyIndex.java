@@ -17,6 +17,7 @@
 
 package org.apache.jackrabbit.oak.plugins.index.property;
 
+import static org.apache.jackrabbit.oak.plugins.index.property.OrderedIndex.OrderDirection;
 import static org.apache.jackrabbit.oak.plugins.index.property.OrderedIndex.TYPE;
 
 import java.util.ArrayList;
@@ -24,31 +25,30 @@ import java.util.Collection;
 import java.util.List;
 
 import org.apache.jackrabbit.oak.api.PropertyValue;
-import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.commons.PathUtils;
+import org.apache.jackrabbit.oak.plugins.index.property.strategy.OrderedContentMirrorStoreStrategy;
 import org.apache.jackrabbit.oak.spi.query.Cursor;
 import org.apache.jackrabbit.oak.spi.query.Cursors;
 import org.apache.jackrabbit.oak.spi.query.Filter;
 import org.apache.jackrabbit.oak.spi.query.Filter.PropertyRestriction;
+import org.apache.jackrabbit.oak.spi.query.QueryIndex;
 import org.apache.jackrabbit.oak.spi.query.QueryIndex.AdvancedQueryIndex;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.collect.ImmutableList;
-
 /**
  * A property index that supports ordering keys.
  */
-public class OrderedPropertyIndex extends PropertyIndex implements AdvancedQueryIndex {
+public class OrderedPropertyIndex implements QueryIndex, AdvancedQueryIndex {
+
     private static final Logger LOG = LoggerFactory.getLogger(OrderedPropertyIndex.class);
-    
+
     @Override
     public String getIndexName() {
         return TYPE;
     }
 
-    @Override
     OrderedPropertyIndexLookup getLookup(NodeState root) {
         return new OrderedPropertyIndexLookup(root);
     }
@@ -66,7 +66,7 @@ public class OrderedPropertyIndex extends PropertyIndex implements AdvancedQuery
     /**
      * @return an builder with some initial common settings
      */
-    private static IndexPlan.Builder getIndexPlanBuilder(final Filter filter) {
+    static IndexPlan.Builder getIndexPlanBuilder(final Filter filter) {
         IndexPlan.Builder b = new IndexPlan.Builder();
         b.setCostPerExecution(1); // we're local. Low-cost
         // we're local but slightly more expensive than a standard PropertyIndex
@@ -88,78 +88,31 @@ public class OrderedPropertyIndex extends PropertyIndex implements AdvancedQuery
             LOG.debug("getPlans() - rootState: {} - ", root);
         }
         List<IndexPlan> plans = new ArrayList<IndexPlan>();
+        if (filter.getFullTextConstraint() != null) {
+            // not an appropriate index for full-text search
+            return plans;
+        }
+        if (filter.containsNativeConstraint()) {
+            // not an appropriate index for native search
+            return plans;
+        }
 
-        PropertyIndexLookup pil = getLookup(root);
-        if (pil instanceof OrderedPropertyIndexLookup) {
-            OrderedPropertyIndexLookup lookup = (OrderedPropertyIndexLookup) pil;
-            Collection<PropertyRestriction> restrictions = filter.getPropertyRestrictions();
+        OrderedPropertyIndexLookup lookup = getLookup(root);
+        Collection<PropertyRestriction> restrictions = filter.getPropertyRestrictions();
+        String filterPath = filter.getPath();
 
-            // first we process the sole orders as we could be in a situation where we don't have
-            // a where condition indexed but we do for order. In that case we will return always the
-            // whole index
-            if (sortOrder != null) {
-                for (OrderEntry oe : sortOrder) {
-                    String propertyName = PathUtils.getName(oe.getPropertyName());
-                    if (lookup.isIndexed(propertyName, "/", filter)) {
-                        IndexPlan.Builder b = getIndexPlanBuilder(filter);
-                        b.setSortOrder(ImmutableList.of(new OrderEntry(
-                                oe.getPropertyName(),
-                                Type.UNDEFINED,
-                                lookup.isAscending(root, propertyName, filter) ? OrderEntry.Order.ASCENDING
-                                        : OrderEntry.Order.DESCENDING)));
-                        b.setEstimatedEntryCount(lookup.getEstimatedEntryCount(propertyName, null,
-                            filter, null));
-                        IndexPlan plan = b.build();
-                        LOG.debug("plan: {}", plan);
-                        plans.add(plan);
-                    }
-                }
+        // first we process the sole orders as we could be in a situation where we don't have
+        // a where condition indexed but we do for order. In that case we will return always the
+        // whole index
+        if (sortOrder != null) {
+            for (OrderEntry oe : sortOrder) {
+                lookup.collectPlans(filter, filterPath, oe, plans);
             }
+        }
 
-            // then we add plans for each restriction that could apply to us
-            for (Filter.PropertyRestriction pr : restrictions) {
-                String propertyName = PathUtils.getName(pr.propertyName);
-                if (lookup.isIndexed(propertyName, "/", filter)) {
-                    PropertyValue value = null;
-                    boolean createPlan = false;
-                    if (pr.first == null && pr.last == null) {
-                        // open query: [property] is not null
-                        value = null;
-                        createPlan = true;
-                    } else if (pr.first != null && pr.first.equals(pr.last) && pr.firstIncluding
-                               && pr.lastIncluding) {
-                        // [property]=[value]
-                        value = pr.first;
-                        createPlan = true;
-                    } else if (pr.first != null && !pr.first.equals(pr.last)) {
-                        // '>' & '>=' use cases
-                        value = pr.first;
-                        createPlan = true;
-                    } else if (pr.last != null && !pr.last.equals(pr.first)) {
-                        // '<' & '<='
-                        value = pr.last;
-                        createPlan = true;
-                    }
-                    if (createPlan) {
-                        // we always return a sorted set
-                        IndexPlan.Builder b = getIndexPlanBuilder(filter);
-                        b.setSortOrder(ImmutableList.of(new OrderEntry(
-                            propertyName,
-                            Type.UNDEFINED,
-                            lookup.isAscending(root, propertyName, filter) ? OrderEntry.Order.ASCENDING
-                                                                           : OrderEntry.Order.DESCENDING)));
-                        long count = lookup.getEstimatedEntryCount(propertyName, value, filter, pr);
-                        b.setEstimatedEntryCount(count);
-                        LOG.debug("estimatedCount: {}", count);
-
-                        IndexPlan plan = b.build();
-                        LOG.debug("plan: {}", plan);
-                        plans.add(plan);
-                    }
-                }
-            }
-        } else {
-            LOG.error("Without an OrderedPropertyIndexLookup you should not end here");
+        // then we add plans for each restriction that could apply to us
+        for (Filter.PropertyRestriction pr : restrictions) {
+            lookup.collectPlans(filter, filterPath, pr, plans);
         }
 
         return plans;
@@ -169,15 +122,12 @@ public class OrderedPropertyIndex extends PropertyIndex implements AdvancedQuery
     public String getPlanDescription(IndexPlan plan, NodeState root) {
         LOG.debug("getPlanDescription({}, {})", plan, root);
         StringBuilder buff = new StringBuilder("ordered");
-        OrderedPropertyIndexLookup lookup = getLookup(root);
-        Filter filter = plan.getFilter();
+        NodeState definition = plan.getDefinition();
         int depth = 1;
         boolean found = false;
-        for (PropertyRestriction pr : filter.getPropertyRestrictions()) {
+        if (plan.getPropertyRestriction() != null) {
+            PropertyRestriction pr = plan.getPropertyRestriction();
             String propertyName = PathUtils.getName(pr.propertyName);
-            if (!lookup.isIndexed(propertyName, "/", filter)) {
-                continue;
-            }
             String operation = null;
             PropertyValue value = null;       
             // TODO support pr.list
@@ -191,13 +141,13 @@ public class OrderedPropertyIndex extends PropertyIndex implements AdvancedQuery
                 value = pr.first;
             } else if (pr.first != null && !pr.first.equals(pr.last)) {
                 // '>' & '>=' use cases
-                if (lookup.isAscending(root, propertyName, filter)) {
+                if (OrderDirection.isAscending(definition)) {
                     value = pr.first;
                     operation = pr.firstIncluding ? ">=" : ">";
                 }
             } else if (pr.last != null && !pr.last.equals(pr.first)) {
                 // '<' & '<='
-                if (!lookup.isAscending(root, propertyName, filter)) {
+                if (!OrderDirection.isAscending(definition)) {
                     value = pr.last;
                     operation = pr.lastIncluding ? "<=" : "<";
                 }
@@ -205,21 +155,14 @@ public class OrderedPropertyIndex extends PropertyIndex implements AdvancedQuery
             if (operation != null) {
                 buff.append(' ').append(propertyName).append(' ').
                         append(operation).append(' ').append(value);
-            } else {
-                continue;
+                found = true;
             }
-            // stop with the first property that is indexed
-            found = true;
-            break;
         }
         List<OrderEntry> sortOrder = plan.getSortOrder();
         if (!found && sortOrder != null && !sortOrder.isEmpty()) {
             // we could be here if we have a query where the ORDER BY makes us play it.
             for (OrderEntry oe : sortOrder) {
                 String propertyName = PathUtils.getName(oe.getPropertyName());
-                if (!lookup.isIndexed(propertyName, "/", null)) {
-                    continue;
-                }
                 depth = PathUtils.getDepth(oe.getPropertyName());
                 buff.append(" order by ").append(propertyName);
                 // stop with the first property that is indexed
@@ -240,44 +183,51 @@ public class OrderedPropertyIndex extends PropertyIndex implements AdvancedQuery
 
         Filter filter = plan.getFilter();
         List<OrderEntry> sortOrder = plan.getSortOrder();
+        String pathPrefix = plan.getPathPrefix();
         Iterable<String> paths = null;
-        Cursor cursor = null;
-        PropertyIndexLookup pil = getLookup(root);
-        if (pil instanceof OrderedPropertyIndexLookup) {
-            OrderedPropertyIndexLookup lookup = (OrderedPropertyIndexLookup) pil;
-            Collection<PropertyRestriction> prs = filter.getPropertyRestrictions();
-            int depth = 1;
-            for (PropertyRestriction pr : prs) {
-                String propertyName = PathUtils.getName(pr.propertyName);
-                depth = PathUtils.getDepth(pr.propertyName);
-                if (lookup.isIndexed(propertyName, "/", filter)) {
-                    paths = lookup.query(filter, propertyName, pr);
-                } 
+        OrderedContentMirrorStoreStrategy strategy
+                = OrderedPropertyIndexLookup.getStrategy(plan.getDefinition());
+        int depth = 1;
+        PropertyRestriction pr = plan.getPropertyRestriction();
+        if (pr != null) {
+            String propertyName = PathUtils.getName(pr.propertyName);
+            depth = PathUtils.getDepth(pr.propertyName);
+            paths = strategy.query(plan.getFilter(), propertyName,
+                    plan.getDefinition(), pr, pathPrefix);
+        }
+        if (paths == null && sortOrder != null && !sortOrder.isEmpty()) {
+            // we could be here if we have a query where the ORDER BY makes us play it.
+            for (OrderEntry oe : sortOrder) {
+                String propertyName = PathUtils.getName(oe.getPropertyName());
+                depth = PathUtils.getDepth(oe.getPropertyName());
+                paths = strategy.query(plan.getFilter(), propertyName,
+                        plan.getDefinition(), new PropertyRestriction(), pathPrefix);
             }
-            if (paths == null && sortOrder != null && !sortOrder.isEmpty()) {
-                // we could be here if we have a query where the ORDER BY makes us play it.
-                for (OrderEntry oe : sortOrder) {
-                    String propertyName = PathUtils.getName(oe.getPropertyName());
-                    depth = PathUtils.getDepth(oe.getPropertyName());
-                    if (lookup.isIndexed(propertyName, "/", null)) {
-                        paths = lookup.query(filter, propertyName, new PropertyRestriction());
-                    }
-                }
-            }
-            if (paths == null) {
-                // if still here then something went wrong.
-                throw new IllegalStateException(
+        }
+
+        if (paths == null) {
+            // if still here then something went wrong.
+            throw new IllegalStateException(
                     "OrderedPropertyIndex index is used even when no index is available for filter "
-                        + filter);
-            }
-            cursor = Cursors.newPathCursor(paths, filter.getQueryEngineSettings());
-            if (depth > 1) {
-                cursor = Cursors.newAncestorCursor(cursor, depth - 1, filter.getQueryEngineSettings());
-            }
-        } else {
-            // if for some reasons it's not an Ordered Lookup we delegate up the chain
-            cursor = super.query(filter, root);
+                            + filter);
+        }
+        Cursor cursor = Cursors.newPathCursor(paths, filter.getQueryEngineSettings());
+        if (depth > 1) {
+            cursor = Cursors.newAncestorCursor(cursor, depth - 1, filter.getQueryEngineSettings());
         }
         return cursor;
     }
+
+    //--------------------------------------------------------< QueryIndex >--
+
+    @Override
+    public String getPlan(Filter filter, NodeState root) {
+        return getPlanDescription(getIndexPlanBuilder(filter).build(), root);
+    }
+
+    @Override
+    public Cursor query(Filter filter, NodeState root) {
+        return query(getIndexPlanBuilder(filter).build(), root);
+    }
+
 }

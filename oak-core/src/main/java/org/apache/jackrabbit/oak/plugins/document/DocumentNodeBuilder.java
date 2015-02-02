@@ -22,20 +22,18 @@ import java.io.InputStream;
 import javax.annotation.Nonnull;
 
 import org.apache.jackrabbit.oak.api.Blob;
-import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.apache.jackrabbit.oak.plugins.memory.MemoryNodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.ApplyDiff;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 
 import static com.google.common.base.Preconditions.checkNotNull;
-import static com.google.common.base.Preconditions.checkState;
 import static org.apache.jackrabbit.oak.spi.state.AbstractNodeState.checkValidName;
 
 /**
  * A node builder implementation for DocumentMK.
  */
-class DocumentNodeBuilder extends MemoryNodeBuilder {
+class DocumentNodeBuilder extends AbstractDocumentNodeBuilder {
 
     private final DocumentRootBuilder root;
 
@@ -114,10 +112,21 @@ class DocumentNodeBuilder extends MemoryNodeBuilder {
         return root.createBlob(stream);
     }
 
-    private static void removeRecursive(NodeBuilder builder) {
+    @Override
+    public boolean remove() {
+        return removeRecursive(this);
+    }
+
+    //---------------------< internal >-----------------------------------------
+
+    private boolean removeInternal() {
+        return super.remove();
+    }
+
+    private static boolean removeRecursive(DocumentNodeBuilder builder) {
         for (String name : builder.getChildNodeNames()) {
             removeRecursive(builder.getChildNode(name));
         }
-        builder.remove();
+        return builder.removeInternal();
     }
 }

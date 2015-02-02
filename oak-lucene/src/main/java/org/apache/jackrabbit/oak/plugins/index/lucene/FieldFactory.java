@@ -16,8 +16,15 @@
  */
 package org.apache.jackrabbit.oak.plugins.index.lucene;
 
+import java.util.Arrays;
+
+import com.google.common.primitives.Ints;
+import org.apache.jackrabbit.oak.api.Type;
+import org.apache.jackrabbit.oak.commons.PathUtils;
+import org.apache.jackrabbit.util.ISO8601;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.FieldType;
+import org.apache.lucene.document.IntField;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.document.TextField;
 
@@ -41,6 +48,13 @@ public final class FieldFactory {
 
     private static final FieldType OAK_TYPE_NOT_STORED = new FieldType();
 
+    private static final int[] TYPABLE_TAGS = {
+            Type.DATE.tag(),
+            Type.BOOLEAN.tag(),
+            Type.DOUBLE.tag(),
+            Type.LONG.tag(),
+    };
+
     static {
         OAK_TYPE.setIndexed(true);
         OAK_TYPE.setOmitNorms(true);
@@ -55,6 +69,12 @@ public final class FieldFactory {
         OAK_TYPE_NOT_STORED.setIndexOptions(DOCS_AND_FREQS_AND_POSITIONS);
         OAK_TYPE_NOT_STORED.setTokenized(true);
         OAK_TYPE_NOT_STORED.freeze();
+
+        Arrays.sort(TYPABLE_TAGS);
+    }
+
+    public static boolean canCreateTypedField(Type<?> type) {
+        return Ints.contains(TYPABLE_TAGS, type.tag());
     }
 
     private final static class OakTextField extends Field {
@@ -84,6 +104,31 @@ public final class FieldFactory {
 
     public static Field newFulltextField(String value) {
         return new TextField(FULLTEXT, value, NO);
+    }
+
+    public static Field newFulltextField(String name, String value) {
+        return new TextField(FieldNames.createFulltextFieldName(name), value, NO);
+    }
+
+    public static Field newAncestorsField(String path){
+        return new TextField(FieldNames.ANCESTORS, path, NO);
+    }
+
+    public static Field newDepthField(String path){
+        return new IntField(FieldNames.PATH_DEPTH, PathUtils.getDepth(path), NO);
+    }
+
+    /**
+     * Date values are saved with sec resolution
+     * @param date jcr data string
+     * @return date value in seconds
+     */
+    public static Long dateToLong(String date){
+        if( date == null){
+            return null;
+        }
+        //TODO OAK-2204 - Should we change the precision to lower resolution
+        return ISO8601.parse(date).getTimeInMillis();
     }
 
 }

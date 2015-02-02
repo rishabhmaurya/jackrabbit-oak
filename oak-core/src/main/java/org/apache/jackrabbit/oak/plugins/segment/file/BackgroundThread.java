@@ -23,6 +23,13 @@ import java.util.Date;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * A small wrapper around the Thread class that periodically calls a runnable.
+ * Please note the Runnable.run() method is not supposed to loop itself, instead
+ * it should just do one operation. This class calls Runnable.run() repeatedly.
+ * This class also measures and logs the time taken by the Runnable.run()
+ * method.
+ */
 class BackgroundThread extends Thread {
 
     /** Logger instance */
@@ -73,6 +80,7 @@ class BackgroundThread extends Thread {
                         + ", max " + maxDuration + "ms");
             }
         } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
             log.error(name + " interrupted", e);
         }
     }

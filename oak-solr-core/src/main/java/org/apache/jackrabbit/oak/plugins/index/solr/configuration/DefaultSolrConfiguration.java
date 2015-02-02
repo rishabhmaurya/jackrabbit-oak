@@ -16,6 +16,12 @@
  */
 package org.apache.jackrabbit.oak.plugins.index.solr.configuration;
 
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import javax.annotation.CheckForNull;
+import javax.annotation.Nonnull;
+
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.spi.query.Filter;
 
@@ -24,20 +30,21 @@ import org.apache.jackrabbit.oak.spi.query.Filter;
  */
 public class DefaultSolrConfiguration implements OakSolrConfiguration {
 
+    private static final Collection<String> ignoredProperties = Arrays.asList(SolrServerConfigurationDefaults.IGNORED_PROPERTIES.split(","));
+    private static final Collection<String> usedProperties = Collections.emptyList();
+
     @Override
     public String getFieldNameFor(Type<?> propertyType) {
-        if (Type.BINARIES.equals(propertyType) || Type.BINARY.equals(propertyType)) {
-            // TODO : use Tika / SolrCell here
-            return propertyType.toString() + "_bin";
-        }
         return null;
     }
 
+    @Nonnull
     @Override
     public String getPathField() {
         return SolrServerConfigurationDefaults.PATH_FIELD_NAME;
     }
 
+    @CheckForNull
     @Override
     public String getFieldForPathRestriction(Filter.PathRestriction pathRestriction) {
         String fieldName = null;
@@ -72,6 +79,7 @@ public class DefaultSolrConfiguration implements OakSolrConfiguration {
         return null;
     }
 
+    @Nonnull
     @Override
     public CommitPolicy getCommitPolicy() {
         return CommitPolicy.SOFT;
@@ -100,6 +108,18 @@ public class DefaultSolrConfiguration implements OakSolrConfiguration {
     @Override
     public boolean useForPathRestrictions() {
         return SolrServerConfigurationDefaults.PATH_RESTRICTIONS;
+    }
+
+    @Nonnull
+    @Override
+    public Collection<String> getIgnoredProperties() {
+        return ignoredProperties;
+    }
+
+    @Nonnull
+    @Override
+    public Collection<String> getUsedProperties() {
+        return usedProperties;
     }
 
 }

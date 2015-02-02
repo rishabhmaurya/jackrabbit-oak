@@ -25,10 +25,11 @@ import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Tree;
 import org.apache.jackrabbit.oak.plugins.index.IndexConstants;
-import org.apache.jackrabbit.oak.plugins.tree.ImmutableTree;
+import org.apache.jackrabbit.oak.plugins.tree.TreeFactory;
+import org.apache.jackrabbit.oak.plugins.tree.impl.ImmutableTree;
 import org.apache.jackrabbit.oak.plugins.lock.LockConstants;
 import org.apache.jackrabbit.oak.plugins.nodetype.TypePredicate;
-import org.apache.jackrabbit.oak.plugins.tree.TreeConstants;
+import org.apache.jackrabbit.oak.plugins.tree.impl.TreeConstants;
 import org.apache.jackrabbit.oak.plugins.version.VersionConstants;
 import org.apache.jackrabbit.oak.spi.commit.DefaultValidator;
 import org.apache.jackrabbit.oak.spi.commit.Validator;
@@ -38,7 +39,7 @@ import org.apache.jackrabbit.oak.spi.security.authorization.permission.Permissio
 import org.apache.jackrabbit.oak.spi.security.authorization.permission.TreePermission;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStateUtils;
-import org.apache.jackrabbit.oak.plugins.tree.ChildOrderDiff;
+import org.apache.jackrabbit.oak.plugins.tree.impl.ChildOrderDiff;
 import org.apache.jackrabbit.oak.util.TreeUtil;
 
 import static com.google.common.base.Preconditions.checkNotNull;
@@ -54,8 +55,8 @@ import static org.apache.jackrabbit.oak.plugins.nodetype.NodeTypeConstants.MIX_C
  */
 class PermissionValidator extends DefaultValidator {
 
-    private final ImmutableTree parentBefore;
-    private final ImmutableTree parentAfter;
+    private final Tree parentBefore;
+    private final Tree parentAfter;
     private final TreePermission parentPermission;
     private final PermissionProvider permissionProvider;
     private final PermissionValidatorProvider provider;
@@ -65,27 +66,27 @@ class PermissionValidator extends DefaultValidator {
 
     private final long permission;
 
-    PermissionValidator(@Nonnull ImmutableTree rootBefore,
-                        @Nonnull ImmutableTree rootAfter,
+    PermissionValidator(@Nonnull NodeState rootBefore,
+                        @Nonnull NodeState rootAfter,
                         @Nonnull PermissionProvider permissionProvider,
                         @Nonnull PermissionValidatorProvider provider) {
-        this.parentBefore = rootBefore;
-        this.parentAfter = rootAfter;
+        this.parentBefore = TreeFactory.createReadOnlyTree(rootBefore);
+        this.parentAfter = TreeFactory.createReadOnlyTree(rootAfter);
         this.parentPermission = permissionProvider.getTreePermission(parentBefore, TreePermission.EMPTY);
 
         this.permissionProvider = permissionProvider;
         this.provider = provider;
 
-        this.isReferenceable = new TypePredicate(rootAfter.getNodeState(), MIX_REFERENCEABLE);
-        this.isCreated = new TypePredicate(rootAfter.getNodeState(), MIX_CREATED);
+        this.isReferenceable = new TypePredicate(rootAfter, MIX_REFERENCEABLE);
+        this.isCreated = new TypePredicate(rootAfter, MIX_CREATED);
 
         permission = Permissions.getPermission(PermissionUtil.getPath(parentBefore, parentAfter), Permissions.NO_PERMISSION);
     }
 
-    protected PermissionValidator(@Nullable ImmutableTree parentBefore,
-                                  @Nullable ImmutableTree parentAfter,
-                                  @Nullable TreePermission parentPermission,
-                                  @Nonnull PermissionValidator parentValidator) {
+    PermissionValidator(@Nullable Tree parentBefore,
+                        @Nullable Tree parentAfter,
+                        @Nullable TreePermission parentPermission,
+                        @Nonnull PermissionValidator parentValidator) {
         this.parentBefore = parentBefore;
         this.parentAfter = parentAfter;
         this.parentPermission = parentPermission;
@@ -107,7 +108,7 @@ class PermissionValidator extends DefaultValidator {
     @Override
     public void propertyAdded(PropertyState after) throws CommitFailedException {
         String name = after.getName();
-        if (!TreeConstants.OAK_CHILD_ORDER.equals(name)) {
+        if (!TreeConstants.OAK_CHILD_ORDER.equals(name) && !isImmutableProperty(name, parentAfter)) {
             checkPermissions(parentAfter, after, Permissions.ADD_PROPERTY);
         }
     }
@@ -120,7 +121,7 @@ class PermissionValidator extends DefaultValidator {
             if (childName != null) {
                 checkPermissions(parentAfter, false, Permissions.MODIFY_CHILD_NODE_COLLECTION);
             } // else: no re-order but only internal update
-        } else if (isImmutableProperty(name)) {
+        } else if (isImmutableProperty(name, parentAfter)) {
             // parent node has been removed and and re-added as
             checkPermissions(parentAfter, false, Permissions.ADD_NODE|Permissions.REMOVE_NODE);
         } else {
@@ -130,14 +131,15 @@ class PermissionValidator extends DefaultValidator {
 
     @Override
     public void propertyDeleted(PropertyState before) throws CommitFailedException {
-        if (!TreeConstants.OAK_CHILD_ORDER.equals(before.getName())) {
+        String name = before.getName();
+        if (!TreeConstants.OAK_CHILD_ORDER.equals(name) && !isImmutableProperty(name, parentBefore)) {
             checkPermissions(parentBefore, before, Permissions.REMOVE_PROPERTY);
         }
     }
 
     @Override
     public Validator childNodeAdded(String name, NodeState after) throws CommitFailedException {
-        ImmutableTree child = checkNotNull(parentAfter.getChild(name));
+        Tree child = checkNotNull(parentAfter.getChild(name));
         if (isVersionstorageTree(child)) {
             child = getVersionHistoryTree(child);
             if (child == null) {
@@ -151,14 +153,14 @@ class PermissionValidator extends DefaultValidator {
 
     @Override
     public Validator childNodeChanged(String name, NodeState before, NodeState after) throws CommitFailedException {
-        ImmutableTree childBefore = parentBefore.getChild(name);
-        ImmutableTree childAfter = parentAfter.getChild(name);
+        Tree childBefore = parentBefore.getChild(name);
+        Tree childAfter = parentAfter.getChild(name);
         return nextValidator(childBefore, childAfter, parentPermission.getChildPermission(name, before));
     }
 
     @Override
     public Validator childNodeDeleted(String name, NodeState before) throws CommitFailedException {
-        ImmutableTree child = parentBefore.getChild(name);
+        Tree child = parentBefore.getChild(name);
         if (isVersionstorageTree(child)) {
             throw new CommitFailedException(
                     ACCESS, 22, "Attempt to remove versionstorage node: Fail to verify delete permission.");
@@ -168,8 +170,8 @@ class PermissionValidator extends DefaultValidator {
 
     //-------------------------------------------------< internal / private >---
     @Nonnull
-    PermissionValidator createValidator(@Nullable ImmutableTree parentBefore,
-                                        @Nullable ImmutableTree parentAfter,
+    PermissionValidator createValidator(@Nullable Tree parentBefore,
+                                        @Nullable Tree parentAfter,
                                         @Nonnull TreePermission parentPermission,
                                         @Nonnull PermissionValidator parentValidator) {
         return new PermissionValidator(parentBefore, parentAfter, parentPermission, parentValidator);
@@ -191,7 +193,7 @@ class PermissionValidator extends DefaultValidator {
     }
 
     @CheckForNull
-    Validator checkPermissions(@Nonnull ImmutableTree tree, boolean isBefore,
+    Validator checkPermissions(@Nonnull Tree tree, boolean isBefore,
                                long defaultPermission) throws CommitFailedException {
         long toTest = getPermission(tree, defaultPermission);
         if (Permissions.isRepositoryPermission(toTest)) {
@@ -200,7 +202,12 @@ class PermissionValidator extends DefaultValidator {
             }
             return null; // no need for further validation down the subtree
         } else {
-            TreePermission tp = parentPermission.getChildPermission(tree.getName(), tree.getNodeState());
+            NodeState ns = getNodeState(tree);
+            if (ns == null) {
+                throw new CommitFailedException(ACCESS, 0, "Access denied");
+            }
+
+            TreePermission tp = parentPermission.getChildPermission(tree.getName(), ns);
             if (!tp.isGranted(toTest)) {
                 throw new CommitFailedException(ACCESS, 0, "Access denied");
             }
@@ -214,7 +221,7 @@ class PermissionValidator extends DefaultValidator {
         }
     }
 
-    private void checkPermissions(@Nonnull ImmutableTree parent,
+    private void checkPermissions(@Nonnull Tree parent,
                                   @Nonnull PropertyState property,
                                   long defaultPermission) throws CommitFailedException {
         if (NodeStateUtils.isHidden(property.getName())) {
@@ -238,8 +245,8 @@ class PermissionValidator extends DefaultValidator {
     }
 
     @Nonnull
-    private Validator nextValidator(@Nullable ImmutableTree parentBefore,
-                                    @Nullable ImmutableTree parentAfter,
+    private Validator nextValidator(@Nullable Tree parentBefore,
+                                    @Nullable Tree parentAfter,
                                     @Nonnull TreePermission treePermission) {
         Validator validator = createValidator(parentBefore, parentAfter, treePermission, this);
         return new VisibleValidator(validator, true, false);
@@ -250,10 +257,9 @@ class PermissionValidator extends DefaultValidator {
             return permission;
         }
         long perm;
-        if (provider.getAccessControlContext().definesTree(tree)) {
+        if (testAccessControlPermission(tree)) {
             perm = Permissions.MODIFY_ACCESS_CONTROL;
-        } else if (provider.getUserContext().definesTree(tree)
-                && !provider.requiresJr2Permissions(Permissions.USER_MANAGEMENT)) {
+        } else if (testUserPermission(tree)) {
             perm = Permissions.USER_MANAGEMENT;
         } else if (isIndexDefinition(tree)) {
             perm = Permissions.INDEX_DEFINITION_MANAGEMENT;
@@ -263,7 +269,7 @@ class PermissionValidator extends DefaultValidator {
         return perm;
     }
 
-    private long getPermission(@Nonnull ImmutableTree parent, @Nonnull PropertyState propertyState, long defaultPermission) {
+    private long getPermission(@Nonnull Tree parent, @Nonnull PropertyState propertyState, long defaultPermission) {
         if (permission != Permissions.NO_PERMISSION) {
             return permission;
         }
@@ -271,7 +277,7 @@ class PermissionValidator extends DefaultValidator {
         long perm;
         if (JcrConstants.JCR_PRIMARYTYPE.equals(name)) {
             if (defaultPermission == Permissions.MODIFY_PROPERTY) {
-                perm = Permissions.NODE_TYPE_MANAGEMENT;
+                perm = getPermission(parent, Permissions.NODE_TYPE_MANAGEMENT);
             } else {
                 // can't determine if this was  a user supplied modification of
                 // the primary type -> omit permission check.
@@ -281,18 +287,6 @@ class PermissionValidator extends DefaultValidator {
             }
         } else if (JcrConstants.JCR_MIXINTYPES.equals(name)) {
             perm = Permissions.NODE_TYPE_MANAGEMENT;
-        } else if (JcrConstants.JCR_UUID.equals(name)) {
-            if (isReferenceable.apply(parent.getNodeState())) {
-                // property added or removed: jcr:uuid is autocreated in
-                // JCR, thus can't determine here if this was a user supplied
-                // modification or not.
-                perm = Permissions.NO_PERMISSION;
-            } else {
-                /* the parent is not referenceable -> check regular permissions
-                   as this instance of jcr:uuid is not the mandatory/protected
-                   property defined by mix:referenceable */
-                perm = defaultPermission;
-            }
         } else if (LockConstants.LOCK_PROPERTY_NAMES.contains(name)) {
             perm = Permissions.LOCK_MANAGEMENT;
         } else if (VersionConstants.VERSION_PROPERTY_NAMES.contains(name)) {
@@ -321,18 +315,27 @@ class PermissionValidator extends DefaultValidator {
         }
     }
 
-    private boolean isImmutableProperty(String name) {
+    private boolean isImmutableProperty(@Nonnull String name, @Nonnull Tree parent) {
         // NOTE: we cannot rely on autocreated/protected definition as this
         // doesn't reveal if a given property is expected to be never modified
         // after creation.
-        if (JcrConstants.JCR_UUID.equals(name) && isReferenceable.apply(parentAfter.getNodeState())) {
+        NodeState parentNs = getNodeState(parent);
+        if (JcrConstants.JCR_UUID.equals(name) && isReferenceable.apply(parentNs)) {
             return true;
         } else if ((JCR_CREATED.equals(name) || JCR_CREATEDBY.equals(name))
-                && isCreated.apply(parentAfter.getNodeState())) {
+                && isCreated.apply(parentNs)) {
             return true;
         } else {
             return false;
         }
+    }
+
+    private boolean testUserPermission(@Nonnull Tree tree) {
+        return provider.getUserContext().definesTree(tree) && !provider.requiresJr2Permissions(Permissions.USER_MANAGEMENT);
+    }
+
+    private boolean testAccessControlPermission(@Nonnull Tree tree) {
+        return provider.getAccessControlContext().definesTree(tree);
     }
 
     private boolean isVersionstorageTree(Tree tree) {
@@ -341,7 +344,7 @@ class PermissionValidator extends DefaultValidator {
     }
 
     @CheckForNull
-    private ImmutableTree getVersionHistoryTree(Tree versionstorageTree) throws CommitFailedException {
+    private Tree getVersionHistoryTree(Tree versionstorageTree) throws CommitFailedException {
         Tree versionHistory = null;
         for (Tree child : versionstorageTree.getChildren()) {
             if (VersionConstants.NT_VERSIONHISTORY.equals(TreeUtil.getPrimaryTypeName(child))) {
@@ -352,10 +355,19 @@ class PermissionValidator extends DefaultValidator {
                 throw new CommitFailedException("Misc", 0, "unexpected node");
             }
         }
-        return (ImmutableTree) versionHistory;
+        return versionHistory;
     }
 
     private boolean isIndexDefinition(@Nonnull Tree tree) {
         return tree.getPath().contains(IndexConstants.INDEX_DEFINITIONS_NAME);
+    }
+
+    @CheckForNull
+    private static NodeState getNodeState(@Nonnull Tree tree) {
+        if (tree instanceof ImmutableTree) {
+            return ((ImmutableTree) tree).getNodeState();
+        } else {
+            return null;
+        }
     }
 }

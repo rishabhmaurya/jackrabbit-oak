@@ -30,6 +30,14 @@
   <!-- Display info messages from the benchmark suite -->
   <logger name="org.apache.jackrabbit.oak.benchmark" level="INFO"/>
 
+  <!-- Display info messages from the LastRevRecoveryAgent-->
+  <logger name="org.apache.jackrabbit.oak.plugins.document.LastRevRecoveryAgent" level="INFO"/>
+
+  <!-- Display info messages from the scalability suite -->
+  <logger name="org.apache.jackrabbit.oak.scalability" level="INFO"/>
+
+  <logger name="org.apache.jackrabbit.oak.plugins.segment.file.tooling.ConsistencyChecker" level="DEBUG"/>
+
   <root level="warn">
     <appender-ref ref="STDERR" />
   </root>

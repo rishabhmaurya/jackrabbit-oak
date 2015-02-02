@@ -70,9 +70,16 @@ public class BenchmarkRunner {
         OptionSpec<File> wikipedia = parser
                 .accepts("wikipedia", "Wikipedia dump").withRequiredArg()
                 .ofType(File.class);
+        OptionSpec<Boolean> luceneIndexOnFS = parser
+                .accepts("luceneIndexOnFS", "Store Lucene index on file system")
+                .withOptionalArg()
+                .ofType(Boolean.class).defaultsTo(false);
         OptionSpec<Boolean> withStorage = parser
                 .accepts("storage", "Index storage enabled").withOptionalArg()
                 .ofType(Boolean.class);
+        OptionSpec<String> withServer = parser
+                .accepts("server", "Solr server host").withOptionalArg()
+                .ofType(String.class);
         OptionSpec<Boolean> runAsAdmin = parser.accepts("runAsAdmin", "Run test using admin session")
                 .withRequiredArg().ofType(Boolean.class).defaultsTo(Boolean.FALSE);
         OptionSpec<String> runAsUser = parser.accepts("runAsUser", "Run test using admin, anonymous or a test user")
@@ -81,6 +88,10 @@ public class BenchmarkRunner {
                 .withOptionalArg().ofType(Boolean.class).defaultsTo(Boolean.FALSE);
         OptionSpec<Integer> noIterations = parser.accepts("noIterations", "Change default 'passwordHashIterations' parameter.")
                 .withOptionalArg().ofType(Integer.class).defaultsTo(AbstractLoginTest.DEFAULT_ITERATIONS);
+        OptionSpec<Integer> numberOfGroups = parser.accepts("numberOfGroups", "Number of groups to create.")
+                        .withOptionalArg().ofType(Integer.class).defaultsTo(LoginWithMembershipTest.NUMBER_OF_GROUPS_DEFAULT);
+        OptionSpec<Boolean> nestedGroups = parser.accepts("nestedGroups", "Use nested groups.")
+                        .withOptionalArg().ofType(Boolean.class).defaultsTo(false);
         OptionSpec<Integer> itemsToRead = parser.accepts("itemsToRead", "Number of items to read")
                 .withRequiredArg().ofType(Integer.class).defaultsTo(1000);
         OptionSpec<Integer> concurrency = parser.accepts("concurrency", "Number of test threads.")
@@ -97,6 +108,9 @@ public class BenchmarkRunner {
                 .withOptionalArg().ofType(Boolean.class).defaultsTo(Boolean.FALSE);
         OptionSpec<Integer> numberOfUsers = parser.accepts("numberOfUsers")
                 .withOptionalArg().ofType(Integer.class).defaultsTo(10000);
+        OptionSpec<Boolean> setScope = parser.accepts("setScope", "Whether to use include setScope in the user query.")
+                        .withOptionalArg().ofType(Boolean.class)
+                        .defaultsTo(Boolean.FALSE);
         OptionSpec<String> nonOption = parser.nonOptions();
         OptionSpec help = parser.acceptsAll(asList("h", "?", "help"), "show help").forHelp();
         OptionSet options = parser.parse(args);
@@ -121,10 +135,6 @@ public class BenchmarkRunner {
                         base.value(options),
                         fdsCache.value(options)),
                 OakRepositoryFixture.getMongoNS(
-                        host.value(options), port.value(options),
-                        dbName.value(options), dropDBAfterTest.value(options),
-                        cacheSize * MB),
-                OakRepositoryFixture.getMongoMK(
                         host.value(options), port.value(options),
                         dbName.value(options), dropDBAfterTest.value(options),
                         cacheSize * MB),
@@ -157,6 +167,15 @@ public class BenchmarkRunner {
                     noIterations.value(options)),
             new LoginSystemTest(),
             new LoginImpersonateTest(),
+            new LoginWithMembershipTest(
+                    runWithToken.value(options),
+                    noIterations.value(options),
+                    numberOfGroups.value(options),
+                    nestedGroups.value(options)),
+            new LoginWithMembersTest(
+                    runWithToken.value(options),
+                    noIterations.value(options),
+                    numberOfGroups.value(options)),
             new NamespaceTest(),
             new NamespaceRegistryTest(),
             new ReadPropertyTest(),
@@ -184,6 +203,9 @@ public class BenchmarkRunner {
                     wikipedia.value(options),
                     flatStructure.value(options),
                     report.value(options)),
+            new RepositoryGrowthTest(wikipedia.value(options),
+                    base.value(options),
+                    luceneIndexOnFS.value(options)),
             new CreateNodesBenchmark(),
             new ManyNodes(),
             new ObservationTest(),
@@ -256,7 +278,12 @@ public class BenchmarkRunner {
             new FullTextSearchTest(
                     wikipedia.value(options),
                     flatStructure.value(options),
-                    report.value(options), withStorage.value(options))
+                    report.value(options), withStorage.value(options)),
+            new FullTextSolrSearchTest(
+                    wikipedia.value(options),
+                    flatStructure.value(options),
+                    report.value(options), withStorage.value(options), withServer.value(options)),
+            new FindAuthorizableWithScopeTest(numberOfUsers.value(options), setScope.value(options))
         };
 
         Set<String> argset = Sets.newHashSet(nonOption.values(options));

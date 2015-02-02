@@ -74,8 +74,8 @@ public class ClusterNodeInfo {
          */
         ACTIVE;
 
-        static ClusterNodeState fromString(String state){
-            if(state == null){
+        static ClusterNodeState fromString(String state) {
+            if (state == null) {
                 return NONE;
             }
             return valueOf(state);
@@ -96,8 +96,8 @@ public class ClusterNodeInfo {
          */
         ACQUIRED;
 
-        static RecoverLockState fromString(String state){
-            if(state == null){
+        static RecoverLockState fromString(String state) {
+            if (state == null) {
                 return NONE;
             }
             return valueOf(state);
@@ -290,7 +290,7 @@ public class ClusterNodeInfo {
                 success = true;
             }
 
-            if(success){
+            if (success) {
                 return clusterNode;
             }
         }
@@ -300,10 +300,7 @@ public class ClusterNodeInfo {
     private static ClusterNodeInfo createInstance(DocumentStore store, String machineId,
             String instanceId) {
         long now = getCurrentTime();
-        // keys between "0" and "a" includes all possible numbers
-        List<ClusterNodeInfoDocument> list = store.query(Collection.CLUSTER_NODES,
-                ClusterNodeInfoDocument.MIN_ID_VALUE, ClusterNodeInfoDocument.MAX_ID_VALUE,
-                Integer.MAX_VALUE);
+        List<ClusterNodeInfoDocument> list = ClusterNodeInfoDocument.all(store);
         int clusterNodeId = 0;
         int maxId = 0;
         ClusterNodeState state = ClusterNodeState.NONE;
@@ -364,11 +361,13 @@ public class ClusterNodeInfo {
      * to ensure the same cluster id is not re-used by a different instance.
      * The lease is only renewed when half of the lease time passed. That is,
      * with a lease time of 60 seconds, the lease is renewed every 30 seconds.
+     *
+     * @return {@code true} if the lease was renewed; {@code false} otherwise.
      */
-    public void renewLease() {
+    public boolean renewLease() {
         long now = getCurrentTime();
         if (now + leaseTime / 2 < leaseEndTime) {
-            return;
+            return false;
         }
         UpdateOp update = new UpdateOp("" + id, true);
         leaseEndTime = now + leaseTime;
@@ -380,6 +379,7 @@ public class ClusterNodeInfo {
             readWriteMode = mode;
             store.setReadWriteMode(mode);
         }
+        return true;
     }
 
     public void setLeaseTime(long leaseTime) {
@@ -424,7 +424,7 @@ public class ClusterNodeInfo {
     /**
      * Resets the clock to the default
      */
-    static void resetClockToDefault(){
+    static void resetClockToDefault() {
         clock = Clock.SIMPLE;
     }
 
@@ -445,16 +445,21 @@ public class ClusterNodeInfo {
      * @return the unique id
      */
     private static String getMachineId() {
+        Exception exception = null;
         try {
             ArrayList<String> list = new ArrayList<String>();
             Enumeration<NetworkInterface> e = NetworkInterface
                     .getNetworkInterfaces();
             while (e.hasMoreElements()) {
                 NetworkInterface ni = e.nextElement();
-                byte[] mac = ni.getHardwareAddress();
-                if (mac != null) {
-                    String x = StringUtils.convertBytesToHex(mac);
-                    list.add(x);
+                try {
+                    byte[] mac = ni.getHardwareAddress();
+                    if (mac != null) {
+                        String x = StringUtils.convertBytesToHex(mac);
+                        list.add(x);
+                    }
+                } catch (Exception e2) {
+                    exception = e2;
                 }
             }
             if (list.size() > 0) {
@@ -464,7 +469,10 @@ public class ClusterNodeInfo {
                 return "mac:" + list.get(0);
             }
         } catch (Exception e) {
-            LOG.error("Error calculating the machine id", e);
+            exception = e;
+        }
+        if (exception != null) {
+            LOG.warn("Error getting the machine id; using a UUID", exception);
         }
         return RANDOM_PREFIX + UUID.randomUUID().toString();
     }

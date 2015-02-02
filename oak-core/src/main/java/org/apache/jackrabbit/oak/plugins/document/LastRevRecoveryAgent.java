@@ -32,11 +32,11 @@ import javax.annotation.CheckForNull;
 
 import com.google.common.base.Predicate;
 import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
 
 import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.apache.jackrabbit.oak.plugins.document.mongo.MongoDocumentStore;
 import org.apache.jackrabbit.oak.plugins.document.mongo.MongoMissingLastRevSeeker;
+import org.apache.jackrabbit.oak.plugins.document.util.MapFactory;
 import org.apache.jackrabbit.oak.plugins.document.util.Utils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -52,7 +52,7 @@ public class LastRevRecoveryAgent {
 
     private final MissingLastRevSeeker missingLastRevUtil;
 
-    LastRevRecoveryAgent(DocumentNodeStore nodeStore) {
+    public LastRevRecoveryAgent(DocumentNodeStore nodeStore) {
         this.nodeStore = nodeStore;
 
         if (nodeStore.getDocumentStore() instanceof MongoDocumentStore) {
@@ -97,14 +97,10 @@ public class LastRevRecoveryAgent {
                     startTime = leaseEnd - leaseTime - asyncDelay;
                 }
 
-                // Endtime is the leaseEnd + the asyncDelay
-                long endTime = leaseEnd + asyncDelay;
+                log.info("Recovering candidates modified after: [{}] for clusterId [{}]",
+                        Utils.timestampToString(startTime), clusterId);
 
-                log.info("Recovering candidates modified in time range : [{},{}] for clusterId [{}]",
-                        Utils.timestampToString(startTime),
-                        Utils.timestampToString(endTime), clusterId);
-
-                return recoverCandidates(clusterId, startTime, endTime);
+                return recoverCandidates(clusterId, startTime);
             }
         }
 
@@ -114,33 +110,50 @@ public class LastRevRecoveryAgent {
 
     /**
      * Recover the correct _lastRev updates for the given candidate nodes.
+     *
+     * @param suspects the potential suspects
+     * @param clusterId the cluster id for which _lastRev recovery needed
+     * @return the number of documents that required recovery.
+     */
+    public int recover(Iterator<NodeDocument> suspects, int clusterId) {
+        return recover(suspects, clusterId, false);
+    }
+
+    /**
+     * Recover the correct _lastRev updates for the given candidate nodes.
      * 
      * @param suspects the potential suspects
      * @param clusterId the cluster id for which _lastRev recovery needed
-     * @return the int
+     * @param dryRun if {@code true}, this method will only perform a check
+     *               but not apply the changes to the _lastRev fields.
+     * @return the number of documents that required recovery. This method
+     *          returns the number of the affected documents even if
+     *          {@code dryRun} is set true and no document was changed.
      */
-    public int recover(Iterator<NodeDocument> suspects, int clusterId) {
+    public int recover(Iterator<NodeDocument> suspects,
+                       int clusterId, boolean dryRun) {
         UnsavedModifications unsaved = new UnsavedModifications();
         UnsavedModifications unsavedParents = new UnsavedModifications();
 
         //Map of known last rev of checked paths
-        Map<String, Revision> knownLastRevs = Maps.newHashMap();
+        Map<String, Revision> knownLastRevs = MapFactory.getInstance().create();
 
+        long count = 0;
         while (suspects.hasNext()) {
             NodeDocument doc = suspects.next();
+            count++;
+            if (count % 100000 == 0) {
+                log.info("Scanned {} suspects so far...", count);
+            }
 
             Revision currentLastRev = doc.getLastRev().get(clusterId);
             if (currentLastRev != null) {
                 knownLastRevs.put(doc.getPath(), currentLastRev);
             }
-            Revision lostLastRev = determineMissedLastRev(doc, clusterId);
+            // 1. determine last committed modification on document
+            Revision lastModifiedRev = determineLastModification(doc, clusterId);
 
-            //1. Update lastRev for this doc
-            if (lostLastRev != null) {
-                unsaved.put(doc.getPath(), lostLastRev);
-            }
-
-            Revision lastRevForParents = lostLastRev != null ? lostLastRev : currentLastRev;
+            Revision lastRevForParents = Utils.max(lastModifiedRev, currentLastRev);
 
             //If both currentLastRev and lostLastRev are null it means
             //that no change is done by suspect cluster on this document
@@ -178,33 +191,33 @@ public class LastRevRecoveryAgent {
         //Note the size before persist as persist operation
         //would empty the internal state
         int size = unsaved.getPaths().size();
+        String updates = unsaved.toString();
 
-        if (log.isDebugEnabled()) {
-            log.debug("Last revision for following documents would be updated {}", unsaved
-                    .getPaths());
+        if (dryRun) {
+            log.info("Dry run of lastRev recovery identified [{}] documents for " +
+                    "cluster node [{}]: {}", size, clusterId, updates);
+        } else {
+            //UnsavedModifications is designed to be used in concurrent
+            //access mode. For recovery case there is no concurrent access
+            //involve so just pass a new lock instance
+            unsaved.persist(nodeStore, new ReentrantLock());
+
+            log.info("Updated lastRev of [{}] documents while performing lastRev recovery for " +
+                    "cluster node [{}]: {}", size, clusterId, updates);
         }
-
-        //UnsavedModifications is designed to be used in concurrent
-        //access mode. For recovery case there is no concurrent access
-        //involve so just pass a new lock instance
-        unsaved.persist(nodeStore, new ReentrantLock());
-
-        log.info("Updated lastRev of [{}] documents while performing lastRev recovery for " +
-                "cluster node [{}]", size, clusterId);
 
         return size;
     }
 
     /**
-     * Retrieves possible candidates which have been modifed in the time range and recovers the
-     * missing updates.
+     * Retrieves possible candidates which have been modified after the given
+     * {@code startTime} and recovers the missing updates.
      * 
      * @param clusterId the cluster id
      * @param startTime the start time
-     * @param endTime the end time
      * @return the int the number of restored nodes
      */
-    private int recoverCandidates(final int clusterId, final long startTime, final long endTime) {
+    private int recoverCandidates(final int clusterId, final long startTime) {
         boolean lockAcquired = missingLastRevUtil.acquireRecoveryLock(clusterId);
 
         //TODO What if recovery is being performed for current clusterNode by some other node
@@ -215,7 +228,7 @@ public class LastRevRecoveryAgent {
             return 0;
         }
 
-        Iterable<NodeDocument> suspects = missingLastRevUtil.getCandidates(startTime, endTime);
+        Iterable<NodeDocument> suspects = missingLastRevUtil.getCandidates(startTime);
         log.debug("Performing Last Revision recovery for cluster {}", clusterId);
 
         try {
@@ -228,21 +241,17 @@ public class LastRevRecoveryAgent {
     }
 
     /**
-     * Determines the last revision value which needs to set for given clusterId
-     * on the passed document. If the last rev entries are consisted
+     * Determines the last committed modification to the given document by
+     * a {@code clusterId}.
      * 
-     * @param doc NodeDocument where lastRev entries needs to be fixed
-     * @param clusterId clusterId for which lastRev has to be checked
-     * @return lastRev which needs to be updated. <tt>null</tt> if no
-     *         updated is required i.e. lastRev entries are valid
+     * @param doc a document.
+     * @param clusterId clusterId for which the last committed modification is
+     *                  looked up.
+     * @return the commit revision of the last modification by {@code clusterId}
+     *          to the given document.
      */
     @CheckForNull
-    private Revision determineMissedLastRev(NodeDocument doc, int clusterId) {
-        Revision currentLastRev = doc.getLastRev().get(clusterId);
-        if (currentLastRev == null) {
-            currentLastRev = new Revision(0, 0, clusterId);
-        }
-
+    private Revision determineLastModification(NodeDocument doc, int clusterId) {
         ClusterPredicate cp = new ClusterPredicate(clusterId);
 
         // Merge sort the revs for which changes have been made
@@ -256,21 +265,12 @@ public class LastRevRecoveryAgent {
                 StableRevisionComparator.REVERSE
                 );
 
-        // Look for latest valid revision > currentLastRev
-        // if found then lastRev needs to be fixed
+        Revision lastModified = null;
+        // Look for latest valid revision
         for (Revision rev : revs) {
-            if (rev.compareRevisionTime(currentLastRev) > 0) {
-                if (doc.isCommitted(rev)) {
-                    return rev;
-                }
-            } else {
-                // No valid revision found > currentLastRev
-                // indicates that lastRev is valid for given clusterId
-                // and no further checks are required
-                break;
-            }
+            lastModified = Utils.max(lastModified, doc.getCommitRevision(rev));
         }
-        return null;
+        return lastModified;
     }
 
     /**

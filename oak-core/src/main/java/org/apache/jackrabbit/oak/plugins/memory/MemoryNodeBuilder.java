@@ -16,6 +16,22 @@
  */
 package org.apache.jackrabbit.oak.plugins.memory;
 
+// WARNING! WARNING! WARNING! WARNING! WARNING! WARNING! WARNING! WARNING! //
+//                                                                         //
+// This class has complex internals that have evolved in over a hundred    //
+// commits. It is a central component in how Oak handles modifications to  //
+// content trees. Please use 'svn blame', 'svn log' and the referenced     //
+// Jira issues to understand the reason for some of the more complex parts //
+// of this class. See also the MemoryNodeBuilderTest for existing tests.   //
+//                                                                         //
+// WARNING! WARNING! WARNING! WARNING! WARNING! WARNING! WARNING! WARNING! //
+
+import static com.google.common.base.Objects.toStringHelper;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+import static org.apache.jackrabbit.oak.plugins.memory.EmptyNodeState.EMPTY_NODE;
+import static org.apache.jackrabbit.oak.spi.state.AbstractNodeState.checkValidName;
+
 import java.io.IOException;
 import java.io.InputStream;
 
@@ -24,7 +40,6 @@ import javax.annotation.Nonnull;
 
 import com.google.common.base.Objects;
 import com.google.common.io.ByteStreams;
-
 import org.apache.jackrabbit.oak.api.Blob;
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Type;
@@ -33,12 +48,6 @@ import org.apache.jackrabbit.oak.spi.state.EqualsDiff;
 import org.apache.jackrabbit.oak.spi.state.MoveDetector;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
-
-import static com.google.common.base.Objects.toStringHelper;
-import static com.google.common.base.Preconditions.checkNotNull;
-import static com.google.common.base.Preconditions.checkState;
-import static org.apache.jackrabbit.oak.plugins.memory.EmptyNodeState.EMPTY_NODE;
-import static org.apache.jackrabbit.oak.spi.state.AbstractNodeState.checkValidName;
 
 /**
  * In-memory node state builder.
@@ -236,12 +245,15 @@ public class MemoryNodeBuilder implements NodeBuilder {
      * Replaces the current state of this builder with the given node state.
      * The base state remains unchanged.
      *
-     * @param newHead new head state
+     * @param newState new state
      */
-    protected void set(NodeState newHead) {
-        checkState(parent == null);
-        // updating the base revision forces all sub-builders to refresh
-        baseRevision = rootHead.setState(newHead);
+    protected void set(NodeState newState) {
+        if (parent == null) {
+            // updating the base revision forces all sub-builders to refresh
+            baseRevision = rootHead.setState(newState);
+        } else {
+            parent.setChildNode(name, newState);
+        }
     }
 
     //--------------------------------------------------------< NodeBuilder >---

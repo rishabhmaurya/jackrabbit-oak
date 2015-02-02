@@ -33,7 +33,9 @@ import org.apache.jackrabbit.oak.plugins.document.util.Utils;
 import com.google.common.base.Function;
 import com.google.common.base.Predicate;
 import com.google.common.collect.Iterables;
+import com.google.common.collect.Iterators;
 import com.google.common.collect.Maps;
+import com.google.common.collect.PeekingIterator;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 import static org.apache.jackrabbit.oak.plugins.document.Collection.NODES;
@@ -95,21 +97,6 @@ class UnsavedModifications {
     }
 
     /**
-     * Applies all modifications from this instance to the <code>other</code>.
-     * A modification is only applied if there is no modification in other
-     * for a given path or if the other modification is earlier than the
-     * {@code commit} revision.
-     *
-     * @param other the other <code>UnsavedModifications</code>.
-     * @param commit the commit revision.
-     */
-    public void applyTo(UnsavedModifications other, Revision commit) {
-        for (Map.Entry<String, Revision> entry : map.entrySet()) {
-            other.put(entry.getKey(), commit);
-        }
-    }
-
-    /**
      * Returns all paths of nodes with modifications at the start revision
      * (inclusive) or later.
      *
@@ -147,7 +134,7 @@ class UnsavedModifications {
      */
     public void persist(@Nonnull DocumentNodeStore store,
                         @Nonnull Lock lock) {
-        if (map.isEmpty()) {
+        if (map.size() == 0) {
             return;
         }
         checkNotNull(store);
@@ -157,36 +144,35 @@ class UnsavedModifications {
         lock.lock();
         Map<String, Revision> pending;
         try {
-            pending = Maps.newHashMap(map);
+            pending = Maps.newTreeMap(PathComparator.INSTANCE);
+            pending.putAll(map);
         } finally {
             lock.unlock();
         }
-        ArrayList<String> paths = new ArrayList<String>(pending.keySet());
-        // sort by depth (high depth first), then path
-        Collections.sort(paths, PathComparator.INSTANCE);
-
         UpdateOp updateOp = null;
         Revision lastRev = null;
+        PeekingIterator<String> paths = Iterators.peekingIterator(
+                pending.keySet().iterator());
+        int i = 0;
         ArrayList<String> pathList = new ArrayList<String>();
-        for (int i = 0; i < paths.size();) {
-            String p = paths.get(i);
+        while (paths.hasNext()) {
+            String p = paths.peek();
             Revision r = pending.get(p);
-            if (r == null) {
-                i++;
-                continue;
-            }
+
             int size = pathList.size();
             if (updateOp == null) {
                 // create UpdateOp
-                Commit commit = new Commit(store, null, r);
+                Commit commit = new Commit(store, r, null, null);
                 updateOp = commit.getUpdateOperationForNode(p);
                 NodeDocument.setLastRev(updateOp, r);
                 lastRev = r;
                 pathList.add(p);
+                paths.next();
                 i++;
             } else if (r.equals(lastRev)) {
                 // use multi update when possible
                 pathList.add(p);
+                paths.next();
                 i++;
             }
             // call update if any of the following is true:
@@ -194,7 +180,7 @@ class UnsavedModifications {
             //   root document, individually)
             // - revision is not equal to last revision (size of ids didn't change)
             // - the update limit is reached
-            if (i + 2 > paths.size()
+            if (i + 2 > pending.size()
                     || size == pathList.size()
                     || pathList.size() >= BACKGROUND_MULTI_UPDATE_LIMIT) {
                 List<String> ids = new ArrayList<String>();
@@ -210,5 +196,10 @@ class UnsavedModifications {
                 lastRev = null;
             }
         }
+    }
+
+    @Override
+    public String toString() {
+        return map.toString();
     }
 }

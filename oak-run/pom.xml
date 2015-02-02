@@ -31,7 +31,6 @@
   <name>Oak Runnable Jar</name>
 
   <properties>
-    <skip.deployment>true</skip.deployment>
     <jetty.version>8.1.2.v20120308</jetty.version>
     <groovy.version>2.3.1</groovy.version>
   </properties>
@@ -81,40 +80,92 @@
       </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-shade-plugin</artifactId>
-        <version>1.6</version>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <version>2.8</version>
+        <executions>
+          <execution>
+            <id>copy</id>
+            <phase>package</phase>
+            <goals>
+              <goal>unpack</goal>
+            </goals>
+            <configuration>
+              <artifactItems>
+                <artifactItem>
+                  <groupId>org.apache.lucene</groupId>
+                  <artifactId>lucene-core</artifactId>
+                  <version>3.6.0</version>
+                  <type>jar</type>
+                  <overWrite>false</overWrite>
+                  <outputDirectory>${project.build.directory}/jr2</outputDirectory>
+                </artifactItem>
+              </artifactItems>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-assembly-plugin</artifactId>
+        <version>2.4</version>
+        <configuration>
+          <archive>
+            <manifest>
+              <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+              <addDefaultSpecificationEntries>true</addDefaultSpecificationEntries>
+              <mainClass>org.apache.jackrabbit.oak.run.Main</mainClass>
+            </manifest>
+          </archive>
+        </configuration>
+        <executions>
+          <execution>
+            <id>create-oak</id>
+            <phase>package</phase>
+            <goals>
+              <goal>single</goal>
+            </goals>
+            <configuration>
+              <attach>false</attach>
+              <descriptors>
+                <descriptor>src/main/assembly/oak-run.xml</descriptor>
+              </descriptors>
+            </configuration>
+          </execution>
+          <execution>
+            <id>create-jr2</id>
+            <phase>package</phase>
+            <goals>
+              <goal>single</goal>
+            </goals>
+            <configuration>
+              <descriptors>
+                <descriptor>src/main/assembly/oak-run-jr2.xml</descriptor>
+              </descriptors>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-antrun-plugin</artifactId>
+        <version>1.7</version>
         <executions>
           <execution>
             <phase>package</phase>
-            <goals>
-              <goal>shade</goal>
-            </goals>
             <configuration>
-              <createDependencyReducedPom>false</createDependencyReducedPom>
-              <artifactSet>
-                <includes>
-                  <include>*</include>
-                </includes>
-                <excludes>
-                  <exclude>${lucene.exclude}</exclude>
-                </excludes>
-              </artifactSet>
-              <filters>
-                <filter>
-                  <artifact>*</artifact>
-                  <excludes>
-                    <exclude>META-INF/*.SF</exclude>
-                    <exclude>META-INF/*.DSA</exclude>
-                    <exclude>META-INF/*.RSA</exclude>
-                  </excludes>
-                </filter>
-              </filters>
-              <transformers>
-                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                  <mainClass>org.apache.jackrabbit.oak.run.Main</mainClass>
-                </transformer>
-              </transformers>
+              <target>
+                <!--
+                Replace the default oak-run with the one created in assembly so
+                as to ensure default artifact oak-run is the one which has all jars
+                embedded
+                -->
+                <copy file="${project.build.directory}/${project.build.finalName}-oak.jar" tofile="${project.build.directory}/${project.build.finalName}.jar" />
+                <delete file="${project.build.directory}/${project.build.finalName}-oak.jar" />
+              </target>
             </configuration>
+            <goals>
+              <goal>run</goal>
+            </goals>
           </execution>
         </executions>
       </plugin>
@@ -143,6 +194,26 @@
           <systemPropertyVariables>
             <jetty.http.port>${jetty.http.port}</jetty.http.port>
           </systemPropertyVariables>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>com.phasebash.jsdoc</groupId>
+        <artifactId>jsdoc3-maven-plugin</artifactId>
+        <version>1.1.0</version>
+        <executions>
+          <execution>
+            <id>generate-jsdoc</id>
+            <phase>site</phase>
+            <goals>
+              <goal>jsdoc3</goal>
+            </goals>
+          </execution>
+        </executions>
+        <configuration>
+          <outputDirectory>../oak-doc/target/site/oak-mongo-js</outputDirectory>
+          <sourceFiles>
+            <sourceFile>src/main/js/oak-mongo.js</sourceFile>
+          </sourceFiles>
         </configuration>
       </plugin>
     </plugins>
@@ -186,7 +257,33 @@
     </dependency>
     <dependency>
       <groupId>org.apache.jackrabbit</groupId>
+      <artifactId>oak-solr-core</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.solr</groupId>
+      <artifactId>solr-solrj</artifactId>
+      <version>${lucene.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.solr</groupId>
+      <artifactId>solr-core</artifactId>
+      <version>${lucene.version}</version>
+      <exclusions>
+        <exclusion>
+          <groupId>org.apache.lucene</groupId>
+          <artifactId>lucene-core</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.jackrabbit</groupId>
       <artifactId>oak-mk-remote</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.jackrabbit</groupId>
+      <artifactId>oak-tarmk-standby</artifactId>
       <version>${project.version}</version>
     </dependency>
     <dependency>
@@ -249,10 +346,6 @@
       <artifactId>logback-classic</artifactId>
     </dependency>
     <dependency>
-      <groupId>org.apache.jclouds.provider</groupId>
-      <artifactId>aws-s3</artifactId>
-    </dependency>
-    <dependency>
       <groupId>org.codehaus.groovy</groupId>
       <artifactId>groovy-all</artifactId>
       <version>${groovy.version}</version>
@@ -267,7 +360,13 @@
       <artifactId>org.apache.felix.scr.annotations</artifactId>
       <scope>provided</scope>
     </dependency>
-    
+    <dependency>
+      <groupId>org.mapdb</groupId>
+      <artifactId>mapdb</artifactId>
+      <version>1.0.6</version>
+      <scope>compile</scope>
+    </dependency>
+
     <!-- Findbugs annotations -->
     <dependency>
       <groupId>com.google.code.findbugs</groupId>
@@ -285,13 +384,7 @@
 
   <profiles>
     <profile>
-      <activation>
-        <activeByDefault>true</activeByDefault>
-      </activation>
-      <id>oak-run-jr2</id>
-      <properties>
-        <lucene.exclude>org.apache.jackrabbit:oak-lucene</lucene.exclude>
-      </properties>
+      <id>jr2</id>
       <dependencies>
         <dependency>
           <groupId>org.apache.lucene</groupId>
@@ -301,24 +394,16 @@
       </dependencies>
     </profile>
     <profile>
-      <id>oak-run-oak</id>
-      <activation>
-        <activeByDefault>false</activeByDefault>
-      </activation>
-      <properties>
-        <!--
-        Lucene classes are already part of oak-lucene so exclude
-        them in maven-shade-plugin. Otherwise it causes duplicate
-        classes warning
-        -->
-        <lucene.exclude>org.apache.lucene:*</lucene.exclude>
-      </properties>
-      <dependencies>
-        <!--
+      <!--
          oak-lucene embeds the Lucene jar. However when running in IDE
          the IDE use the module classpath. So need to explicitly list the
          lucene jars
         -->
+      <id>ide</id>
+      <activation>
+        <activeByDefault>true</activeByDefault>
+      </activation>
+      <dependencies>
         <dependency>
           <groupId>org.apache.lucene</groupId>
           <artifactId>lucene-core</artifactId>
@@ -339,6 +424,17 @@
           <artifactId>lucene-queries</artifactId>
           <version>${lucene.version}</version>
         </dependency>
+        <dependency>
+          <groupId>org.apache.lucene</groupId>
+          <artifactId>lucene-suggest</artifactId>
+          <version>${lucene.version}</version>
+        </dependency>
+        <dependency>
+          <groupId>org.apache.jackrabbit</groupId>
+          <artifactId>oak-solr-osgi</artifactId> <!-- this is declared here to avoid having it in the jr2 profile too -->
+          <version>${project.version}</version>
+        </dependency>
+
       </dependencies>
     </profile>
   </profiles>

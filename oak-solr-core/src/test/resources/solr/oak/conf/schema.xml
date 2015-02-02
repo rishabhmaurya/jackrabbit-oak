@@ -70,6 +70,13 @@
                 <filter class="solr.LowerCaseFilterFactory"/>
             </analyzer>
         </fieldType>
+        <fieldType name="textSpell" class="solr.TextField" positionIncrementGap="100" >
+            <analyzer>
+                <tokenizer class="solr.StandardTokenizerFactory"/>
+                <filter class="solr.LowerCaseFilterFactory"/>
+                <filter class="solr.RemoveDuplicatesTokenFilterFactory"/>
+            </analyzer>
+        </fieldType>
 
         <fieldType name="boolean" class="solr.BoolField" sortMissingLast="true"/>
 
@@ -109,11 +116,13 @@
         <field name="path_child" type="children_path" indexed="true" stored="false"/>
         <field name="path_anc" type="parent_path" indexed="true" stored="false"/>
         <field name="path_des" type="descendent_path" indexed="true" stored="false"/>
-        <field name="ignored" type="ignored" multiValued="true"/>
-        <field name="catch_all" type="text_general" indexed="true" stored="false" multiValued="true"/>
+        <field name="ignored" type="ignored" />
+        <field name="catch_all" type="text_general" indexed="true" stored="false" multiValued="true" termVectors="true"/> <!-- term vectors used for rep:similar -->
         <field name="_version_" type="long" indexed="true" stored="true"/>
         <field name=":path" type="string" indexed="true" stored="false"/>
+        <field name=":indexed" type="tdate" indexed="true" stored="false" default="NOW" docValues="numeric"/>
 
+        <field name="jcr:data" type="binary"  indexed="true"  stored="false" multiValued="true"/>
         <dynamicField name="*_i"  type="int"    indexed="true"  stored="true"/>
         <dynamicField name="*_is" type="int"    indexed="true"  stored="true"  multiValued="true"/>
         <dynamicField name="*_s"  type="string"  indexed="true"  stored="true" />
@@ -143,6 +152,7 @@
 
         <dynamicField name="*_pi"  type="pint"    indexed="true"  stored="true"/>
         <dynamicField name="*_c"   type="currency" indexed="true"  stored="true"/>
+        <dynamicField name="*_bin" type="binary"  indexed="true"  stored="false" multiValued="true"/>
         <dynamicField name="*" type="text_general" indexed="true" stored="true" multiValued="true"/>
     </fields>
     <uniqueKey>path_exact</uniqueKey>

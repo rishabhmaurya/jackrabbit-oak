@@ -49,6 +49,7 @@ import com.google.common.base.Function;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.io.Closer;
+
 import org.apache.jackrabbit.oak.api.ContentRepository;
 import org.apache.jackrabbit.oak.api.ContentSession;
 import org.apache.jackrabbit.oak.api.Root;
@@ -60,8 +61,11 @@ import org.apache.jackrabbit.oak.management.RepositoryManager;
 import org.apache.jackrabbit.oak.plugins.commit.ConflictHook;
 import org.apache.jackrabbit.oak.plugins.index.AsyncIndexUpdate;
 import org.apache.jackrabbit.oak.plugins.index.CompositeIndexEditorProvider;
+import org.apache.jackrabbit.oak.plugins.index.IndexConstants;
 import org.apache.jackrabbit.oak.plugins.index.IndexEditorProvider;
 import org.apache.jackrabbit.oak.plugins.index.IndexUpdateProvider;
+import org.apache.jackrabbit.oak.plugins.index.counter.jmx.NodeCounter;
+import org.apache.jackrabbit.oak.plugins.index.counter.jmx.NodeCounterMBean;
 import org.apache.jackrabbit.oak.plugins.index.property.jmx.PropertyIndexAsyncReindex;
 import org.apache.jackrabbit.oak.plugins.index.property.jmx.PropertyIndexAsyncReindexMBean;
 import org.apache.jackrabbit.oak.plugins.memory.MemoryNodeStore;
@@ -526,14 +530,20 @@ public class Oak {
             regs.add(scheduleWithFixedDelay(whiteboard, task, 5, true));
             regs.add(registerMBean(whiteboard, IndexStatsMBean.class,
                     task.getIndexStats(), IndexStatsMBean.TYPE, name));
+            // Register AsyncIndexStats for execution stats update
+            regs.add(
+                scheduleWithFixedDelay(whiteboard, task.getIndexStats(), 1, false));
 
             PropertyIndexAsyncReindex asyncPI = new PropertyIndexAsyncReindex(
-                    new AsyncIndexUpdate("async-reindex", store, indexEditors,
-                            true), getExecutor()
-            );
-            regs.add(registerMBean(whiteboard, PropertyIndexAsyncReindexMBean.class,
-                    asyncPI, PropertyIndexAsyncReindexMBean.TYPE, name));
+                    new AsyncIndexUpdate(IndexConstants.ASYNC_REINDEX_VALUE,
+                            store, indexEditors, true), getExecutor());
+            regs.add(registerMBean(whiteboard,
+                    PropertyIndexAsyncReindexMBean.class, asyncPI,
+                    PropertyIndexAsyncReindexMBean.TYPE, name));
         }
+        
+        regs.add(registerMBean(whiteboard, NodeCounterMBean.class,
+                new NodeCounter(store), NodeCounterMBean.TYPE, "nodeCounter"));
 
         regs.add(registerMBean(whiteboard, QueryEngineSettingsMBean.class,
                 queryEngineSettings, QueryEngineSettingsMBean.TYPE, "settings"));

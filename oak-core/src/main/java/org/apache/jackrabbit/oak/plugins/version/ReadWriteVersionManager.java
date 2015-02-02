@@ -38,12 +38,12 @@ import org.apache.jackrabbit.oak.api.Root;
 import org.apache.jackrabbit.oak.api.Tree;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.commons.PathUtils;
-import org.apache.jackrabbit.oak.core.ImmutableRoot;
 import org.apache.jackrabbit.oak.namepath.NamePathMapper;
 import org.apache.jackrabbit.oak.plugins.identifier.IdentifierManager;
 import org.apache.jackrabbit.oak.plugins.memory.PropertyBuilder;
 import org.apache.jackrabbit.oak.plugins.nodetype.ReadOnlyNodeTypeManager;
-import org.apache.jackrabbit.oak.plugins.tree.ImmutableTree;
+import org.apache.jackrabbit.oak.plugins.tree.RootFactory;
+import org.apache.jackrabbit.oak.plugins.tree.TreeFactory;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.util.ISO8601;
 import org.apache.jackrabbit.util.Text;
@@ -71,7 +71,8 @@ import static org.apache.jackrabbit.oak.plugins.version.VersionConstants.REP_VER
 import static org.apache.jackrabbit.oak.plugins.version.VersionConstants.VERSION_STORE_PATH;
 
 /**
- * TODO document
+ * Extends the {@link ReadOnlyVersionManager} with methods to modify the
+ * version store.
  */
 class ReadWriteVersionManager extends ReadOnlyVersionManager {
 
@@ -88,13 +89,13 @@ class ReadWriteVersionManager extends ReadOnlyVersionManager {
     @Nonnull
     @Override
     protected Tree getVersionStorage() {
-        return new ImmutableTree(versionStorageNode.getNodeState());
+        return TreeFactory.createReadOnlyTree(versionStorageNode.getNodeState());
     }
 
     @Nonnull
     @Override
     protected Root getWorkspaceRoot() {
-        return new ImmutableRoot(workspaceRoot.getNodeState());
+        return RootFactory.createReadOnlyRoot(workspaceRoot.getNodeState());
     }
 
     @Nonnull
@@ -189,7 +190,7 @@ class ReadWriteVersionManager extends ReadOnlyVersionManager {
         for (String succId :  successorIds.getValue(Type.REFERENCES)) {
             NodeBuilder successor = getVersionById(vh, succId);
 
-            PropertyBuilder pb = new PropertyBuilder(Type.REFERENCE).setArray();
+            PropertyBuilder<String> pb = PropertyBuilder.array(Type.REFERENCE);
             pb.setName(JCR_PREDECESSORS).setValues(successor.getProperty(JCR_PREDECESSORS).getValue(Type.REFERENCES));
 
             pb.removeValue(versionId);
@@ -200,7 +201,7 @@ class ReadWriteVersionManager extends ReadOnlyVersionManager {
 
         for (String predId :  predecessorIds.getValue(Type.REFERENCES)) {
             NodeBuilder predecessor = getVersionById(vh, predId);
-            PropertyBuilder pb = new PropertyBuilder(Type.REFERENCE).setArray();
+            PropertyBuilder<String> pb = PropertyBuilder.array(Type.REFERENCE);
             pb.setName(JCR_SUCCESSORS).setValues(predecessor.getProperty(JCR_SUCCESSORS).getValue(Type.REFERENCES));
 
             pb.removeValue(versionId);
@@ -214,14 +215,14 @@ class ReadWriteVersionManager extends ReadOnlyVersionManager {
     public void checkout(NodeBuilder versionable) {
         versionable.setProperty(JCR_ISCHECKEDOUT, true, Type.BOOLEAN);
         PropertyState baseVersion = versionable.getProperty(JCR_BASEVERSION);
-        List<String> predecessors = Collections.singletonList(
-                baseVersion.getValue(Type.REFERENCE));
+        List<String> predecessors = Collections.singletonList(baseVersion.getValue(Type.REFERENCE));
         versionable.setProperty(JCR_PREDECESSORS, predecessors, Type.REFERENCES);
     }
 
     public void checkin(@Nonnull NodeBuilder versionable)
             throws CommitFailedException {
-        NodeBuilder history = getOrCreateVersionHistory(versionable, Collections.EMPTY_MAP);
+        NodeBuilder history = getOrCreateVersionHistory(versionable,
+                Collections.<String, Object>emptyMap());
         createVersion(history, versionable);
     }
 
@@ -230,7 +231,8 @@ class ReadWriteVersionManager extends ReadOnlyVersionManager {
                         @Nullable VersionSelector selector)
             throws CommitFailedException {
         String versionPath = getIdentifierManager().getPath(versionUUID);
-        NodeBuilder history = getOrCreateVersionHistory(versionable, Collections.EMPTY_MAP);
+        NodeBuilder history = getOrCreateVersionHistory(versionable,
+                Collections.<String, Object>emptyMap());
         NodeBuilder version = null;
         if (versionPath != null) {
             String versionName = PathUtils.getName(versionPath);
@@ -279,39 +281,6 @@ class ReadWriteVersionManager extends ReadOnlyVersionManager {
                 JCR_VERSIONABLEUUID).getValue(Type.STRING);
         versionable.setProperty(JCR_UUID, versionableUUUID, Type.STRING);
         restore(versionable, uuidFromNode(version), selector);
-    }
-
-    /**
-     * Adds a version label to the jcr:versionLabels node of the referenced
-     * version history.
-     *
-     * @param historyRelPath relative path from the jcr:versionStorage node to
-     *                       the version history node.
-     * @param label          the version label.
-     * @param versionName    the name of the version.
-     * @throws CommitFailedException if there is no such version history or if
-     * there is already a label with the given name or if the given version name
-     * is invalid.
-     */
-    public void addVersionLabel(@Nonnull String historyRelPath,
-                                @Nonnull String label,
-                                @Nonnull String versionName)
-           throws CommitFailedException {
-        NodeBuilder labels = getVersionLabelsFor(checkNotNull(historyRelPath));
-        if (labels.hasProperty(checkNotNull(label))) {
-            throw new CommitFailedException(CommitFailedException.LABEL_EXISTS,
-                    VersionExceptionCode.LABEL_EXISTS.ordinal(),
-                    "Version label " + label + " already exists on this version history");
-        }
-        NodeBuilder history = resolve(versionStorageNode, historyRelPath);
-        if (checkNotNull(versionName).equals(JCR_ROOTVERSION)
-                || !history.hasChildNode(checkNotNull(versionName))) {
-            throw new CommitFailedException(CommitFailedException.VERSION,
-                    VersionExceptionCode.NO_SUCH_VERSION.ordinal(),
-                    "Not a valid version on this history: " + versionName);
-        }
-        String uuid = uuidFromNode(history.getChildNode(versionName));
-        labels.setProperty(label, uuid, Type.REFERENCE);
     }
 
     /**

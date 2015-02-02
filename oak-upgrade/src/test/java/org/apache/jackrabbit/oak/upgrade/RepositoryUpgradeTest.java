@@ -18,26 +18,16 @@
  */
 package org.apache.jackrabbit.oak.upgrade;
 
-import static junit.framework.Assert.assertEquals;
-import static junit.framework.Assert.assertFalse;
-import static junit.framework.Assert.assertNotNull;
-import static junit.framework.Assert.assertTrue;
-import static org.apache.jackrabbit.JcrConstants.JCR_FROZENMIXINTYPES;
-import static org.apache.jackrabbit.JcrConstants.JCR_FROZENPRIMARYTYPE;
-import static org.apache.jackrabbit.JcrConstants.JCR_FROZENUUID;
-import static org.apache.jackrabbit.JcrConstants.JCR_UUID;
-import static org.apache.jackrabbit.JcrConstants.MIX_VERSIONABLE;
-import static org.apache.jackrabbit.JcrConstants.NT_UNSTRUCTURED;
-
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.math.BigDecimal;
 import java.util.Calendar;
 import java.util.Random;
-
+import java.util.Set;
 import javax.jcr.Binary;
 import javax.jcr.NamespaceRegistry;
 import javax.jcr.Node;
+import javax.jcr.NodeIterator;
 import javax.jcr.Property;
 import javax.jcr.PropertyIterator;
 import javax.jcr.PropertyType;
@@ -50,17 +40,26 @@ import javax.jcr.nodetype.NodeTypeManager;
 import javax.jcr.nodetype.NodeTypeTemplate;
 import javax.jcr.nodetype.PropertyDefinition;
 import javax.jcr.nodetype.PropertyDefinitionTemplate;
-import javax.jcr.security.Privilege;
 import javax.jcr.version.Version;
 import javax.jcr.version.VersionHistory;
 import javax.jcr.version.VersionManager;
 
-import org.apache.jackrabbit.api.JackrabbitSession;
+import com.google.common.collect.Sets;
 import org.apache.jackrabbit.api.JackrabbitWorkspace;
-import org.apache.jackrabbit.api.security.authorization.PrivilegeManager;
 import org.apache.jackrabbit.oak.plugins.index.IndexConstants;
 import org.apache.jackrabbit.oak.spi.security.user.UserConstants;
 import org.junit.Test;
+
+import static junit.framework.Assert.assertEquals;
+import static junit.framework.Assert.assertFalse;
+import static junit.framework.Assert.assertNotNull;
+import static junit.framework.Assert.assertTrue;
+import static org.apache.jackrabbit.JcrConstants.JCR_FROZENMIXINTYPES;
+import static org.apache.jackrabbit.JcrConstants.JCR_FROZENPRIMARYTYPE;
+import static org.apache.jackrabbit.JcrConstants.JCR_FROZENUUID;
+import static org.apache.jackrabbit.JcrConstants.JCR_UUID;
+import static org.apache.jackrabbit.JcrConstants.MIX_VERSIONABLE;
+import static org.apache.jackrabbit.JcrConstants.NT_UNSTRUCTURED;
 
 public class RepositoryUpgradeTest extends AbstractRepositoryUpgradeTest {
 
@@ -72,6 +71,7 @@ public class RepositoryUpgradeTest extends AbstractRepositoryUpgradeTest {
         new Random().nextBytes(BINARY);
     }
 
+    @Override
     @SuppressWarnings("unchecked")
     protected void createSourceContent(Repository repository) throws Exception {
         Session session = repository.login(CREDENTIALS);
@@ -81,11 +81,6 @@ public class RepositoryUpgradeTest extends AbstractRepositoryUpgradeTest {
 
             NamespaceRegistry registry = workspace.getNamespaceRegistry();
             registry.registerNamespace("test", "http://www.example.org/");
-
-            PrivilegeManager privilegeManager = workspace.getPrivilegeManager();
-            privilegeManager.registerPrivilege("test:privilege", false, null);
-            privilegeManager.registerPrivilege(
-                    "test:aggregate", false, new String[] { "jcr:read", "test:privilege" });
 
             NodeTypeManager nodeTypeManager = workspace.getNodeTypeManager();
             NodeTypeTemplate template = nodeTypeManager.createNodeTypeTemplate();
@@ -124,6 +119,11 @@ public class RepositoryUpgradeTest extends AbstractRepositoryUpgradeTest {
             Node child = versionable.addNode("child", "test:referenceable");
             child.addNode("child2", NT_UNSTRUCTURED);
             session.save();
+
+            Node sns = root.addNode("sns");
+            sns.addNode("sibling");
+            sns.addNode("sibling");
+            sns.addNode("sibling");
 
             session.getWorkspace().getVersionManager().checkin("/versionable");
 
@@ -174,30 +174,6 @@ public class RepositoryUpgradeTest extends AbstractRepositoryUpgradeTest {
             assertEquals(
                     "http://www.example.org/",
                     session.getNamespaceURI("test"));
-        } finally {
-            session.logout();
-        }
-    }
-
-    @Test
-    public void verifyCustomPrivileges() throws Exception {
-        JackrabbitSession session = createAdminSession();
-        try {
-            JackrabbitWorkspace workspace =
-                    (JackrabbitWorkspace) session.getWorkspace();
-            PrivilegeManager manager = workspace.getPrivilegeManager();
-
-            Privilege privilege = manager.getPrivilege("test:privilege");
-            assertNotNull(privilege);
-            assertFalse(privilege.isAbstract());
-            assertFalse(privilege.isAggregate());
-            assertEquals(0, privilege.getDeclaredAggregatePrivileges().length);
-
-            Privilege aggregate = manager.getPrivilege("test:aggregate");
-            assertNotNull(aggregate);
-            assertFalse(aggregate.isAbstract());
-            assertTrue(aggregate.isAggregate());
-            assertEquals(2, aggregate.getDeclaredAggregatePrivileges().length);
         } finally {
             session.logout();
         }
@@ -437,6 +413,25 @@ public class RepositoryUpgradeTest extends AbstractRepositoryUpgradeTest {
             assertTrue(history.isNodeType("rep:VersionablePaths"));
             Property versionablePath = history.getProperty("default");
             assertEquals("/versionable", versionablePath.getString());
+        } finally {
+            session.logout();
+        }
+    }
+
+    @Test
+    public void verifySNS() throws RepositoryException {
+        Set<String> nodeNames = Sets.newHashSet("sibling", "sibling[2]", "sibling[3]");
+        Session session = createAdminSession();
+        try {
+            Node sns = session.getNode("/sns");
+            NodeIterator ns = sns.getNodes();
+            int c = 0;
+            while (ns.hasNext()) {
+                Node node = ns.nextNode();
+                String name = node.getName();
+                assertTrue("Unexpected node: " + name, nodeNames.remove(name));
+            }
+            assertTrue("Missing nodes: " + nodeNames, nodeNames.isEmpty());
         } finally {
             session.logout();
         }

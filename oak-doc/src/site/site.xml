@@ -31,32 +31,34 @@ under the License.
     </menu>
     <menu name="Concepts and Architecture">
       <item href="architecture/overview.html" name="Overview" />
-      <item href="architecture/nodestate.html" name="The node state model" />
+      <item href="architecture/nodestate.html" name="The Node State Model" />
     </menu>
     <menu name="Main APIs">
       <item href="http://www.day.com/specs/jcr/2.0/index.html" name="JCR API" />
       <item href="oak_api/overview.html" name="Oak API" />
-      <item href="nodestore/overview.html" name="NodeStore and MicroKernel API" />
     </menu>
     <menu name="Features and Plugins">
-      <item href="query.html" name="Query" />
+      <item href="nodestore/overview.html" name="Node Storage" />
+      <item href="plugins/blobstore.html" name="Blob Storage" />
+      <item href="query/query.html" name="Query" />
       <item href="security/overview.html" name="Security" />
-      <item href="plugins/blobstore.html" name="BlobStore" />
       <item href="clustering.html" name="Clustering" />
     </menu>
     <menu name="Using Oak">
       <item href="use_getting_started.html" name="Getting Started" />
-      <item href="construct.html" name="Repository construction" />
+      <item href="construct.html" name="Repository Construction" />
       <item href="osgi_config.html" name="Configuring Oak" />
+      <item href="command_line.html" name="Command Line Tools" />
       <item href="differences.html" name="Differences to Jackrabbit 2" />
       <item href="known_issues.html" name="Known Issues" />
-      <item href="dos_and_donts.html" name="Dos and don'ts" />
+      <item href="dos_and_donts.html" name="Dos and Don'ts" />
+      <item href="coldstandby/coldstandby.html" name="Cold Standby" />
       <item href="FAQ.html" name="FAQ" />
     </menu>
     <menu name="Developing Oak">
       <item href="dev_getting_started.html" name="Getting Started" />
       <item href="participating.html" name="Participating" />
-      <item href="apidocs/index.html" name="API docs" />
+      <item href="apidocs/index.html" name="API Docs" />
     </menu>
     <menu name="Links">
       <item href="http://jackrabbit.apache.org/oak" name="Apache Jackrabbit Oak" />
@@ -74,6 +76,12 @@ under the License.
     <fluidoSkin>
       <sourceLineNumbersEnabled>true</sourceLineNumbersEnabled>
       <topBarEnabled>true</topBarEnabled>
+      <topBarIcon>
+        <name>Oak logo</name>
+        <alt>Oak logo</alt>
+        <src>oak_logo.png</src>
+        <href>/</href>
+      </topBarIcon>
       <sideBarEnabled>true</sideBarEnabled>
       <gitHub>
         <projectId>apache/jackrabbit-oak</projectId>

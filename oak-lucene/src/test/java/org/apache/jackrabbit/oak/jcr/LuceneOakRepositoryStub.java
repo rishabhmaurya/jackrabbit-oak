@@ -18,21 +18,30 @@ package org.apache.jackrabbit.oak.jcr;
 
 import static com.google.common.collect.Lists.newArrayList;
 import static org.apache.jackrabbit.JcrConstants.JCR_CONTENT;
+import static org.apache.jackrabbit.JcrConstants.JCR_PRIMARYTYPE;
 import static org.apache.jackrabbit.JcrConstants.NT_FILE;
+import static org.apache.jackrabbit.oak.api.Type.NAME;
+import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.INDEX_DEFINITIONS_NAME;
+import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.INDEX_DEFINITIONS_NODE_TYPE;
+import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.REINDEX_PROPERTY_NAME;
+import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.TYPE_PROPERTY_NAME;
+import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.TYPE_LUCENE;
 
 import java.util.Properties;
 import java.util.Set;
 
 import javax.jcr.RepositoryException;
 
-import org.apache.jackrabbit.oak.plugins.index.aggregate.AggregateIndexProvider;
 import org.apache.jackrabbit.oak.plugins.index.aggregate.NodeAggregator;
 import org.apache.jackrabbit.oak.plugins.index.aggregate.SimpleNodeAggregator;
-import org.apache.jackrabbit.oak.plugins.index.lucene.LowCostLuceneIndexProvider;
+import org.apache.jackrabbit.oak.plugins.index.lucene.IndexFormatVersion;
+import org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants;
 import org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexEditorProvider;
 import org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexProvider;
 import org.apache.jackrabbit.oak.plugins.index.lucene.util.LuceneInitializerHelper;
 import org.apache.jackrabbit.oak.spi.commit.Observer;
+import org.apache.jackrabbit.oak.spi.query.QueryIndexProvider;
+import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 
 public class LuceneOakRepositoryStub extends OakTarMKRepositoryStub {
 
@@ -43,10 +52,10 @@ public class LuceneOakRepositoryStub extends OakTarMKRepositoryStub {
 
     @Override
     protected void preCreateRepository(Jcr jcr) {
-        LuceneIndexProvider provider = new LowCostLuceneIndexProvider();
+        LuceneIndexProvider provider = new LuceneIndexProvider().with(getNodeAggregator());
         jcr.with(
-                new LuceneInitializerHelper("luceneGlobal", (Set<String>) null))
-                .with(AggregateIndexProvider.wrap(provider.with(getNodeAggregator())))
+                new LuceneCompatModeInitializer("luceneGlobal", (Set<String>) null))
+                .with((QueryIndexProvider)provider)
                 .with((Observer) provider)
                 .with(new LuceneIndexEditorProvider());
     }
@@ -54,5 +63,45 @@ public class LuceneOakRepositoryStub extends OakTarMKRepositoryStub {
     private static NodeAggregator getNodeAggregator() {
         return new SimpleNodeAggregator()
             .newRuleWithName(NT_FILE, newArrayList(JCR_CONTENT, JCR_CONTENT + "/*"));
+    }
+
+    private static class LuceneCompatModeInitializer extends LuceneInitializerHelper {
+        private final String name;
+
+        public LuceneCompatModeInitializer(String name, Set<String> propertyTypes) {
+            super(name, propertyTypes);
+            this.name = name;
+        }
+
+        @Override
+        public void initialize(NodeBuilder builder) {
+            if (builder.hasChildNode(INDEX_DEFINITIONS_NAME)
+                    && builder.getChildNode(INDEX_DEFINITIONS_NAME).hasChildNode(name)) {
+                // do nothing
+            } else {
+                NodeBuilder index = builder.child(INDEX_DEFINITIONS_NAME).child(name);
+                index.setProperty(JCR_PRIMARYTYPE, INDEX_DEFINITIONS_NODE_TYPE, NAME)
+                        .setProperty(TYPE_PROPERTY_NAME, TYPE_LUCENE)
+                        .setProperty(REINDEX_PROPERTY_NAME, true)
+                        .setProperty(LuceneIndexConstants.TEST_MODE, true)
+                        .setProperty(LuceneIndexConstants.EVALUATE_PATH_RESTRICTION, true)
+                        .setProperty(LuceneIndexConstants.COMPAT_MODE, IndexFormatVersion.V2.getVersion());
+
+                NodeBuilder props = index.child(LuceneIndexConstants.INDEX_RULES)
+                        .child("nt:base")
+                        .child(LuceneIndexConstants.PROP_NODE);
+
+                enableFulltextIndex(props.child("allProps"));
+            }
+        }
+
+        private void enableFulltextIndex(NodeBuilder propNode){
+            propNode.setProperty(LuceneIndexConstants.PROP_ANALYZED, true)
+                    .setProperty(LuceneIndexConstants.PROP_NODE_SCOPE_INDEX, true)
+                    .setProperty(LuceneIndexConstants.PROP_USE_IN_EXCERPT, true)
+                    .setProperty(LuceneIndexConstants.PROP_PROPERTY_INDEX, true)
+                    .setProperty(LuceneIndexConstants.PROP_NAME, LuceneIndexConstants.REGEX_ALL_PROPS)
+                    .setProperty(LuceneIndexConstants.PROP_IS_REGEX, true);
+        }
     }
 }

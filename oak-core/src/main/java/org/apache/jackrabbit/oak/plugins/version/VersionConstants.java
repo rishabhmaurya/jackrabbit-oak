@@ -58,27 +58,12 @@ public interface VersionConstants extends JcrConstants {
     String MIX_REP_VERSIONABLE_PATHS = "rep:VersionablePaths";
 
     /**
-     * Version operation property name to add version labels.
-     */
-    String REP_ADD_VERSION_LABELS = "rep:addVersionLabels";
-
-    /**
-     * Version operation property name to remove version labels.
-     */
-    String REP_REMOVE_VERSION_LABELS = "rep:removeVersionLabels";
-
-    /**
-     * Version operation property name to remove version(s).
-     */
-    String REP_REMOVE_VERSION = "rep:removeVersion";
-
-    /**
      * Prefix of the jcr:baseVersion value for a restore.
      */
     String RESTORE_PREFIX = "restore-";
 
     /**
-     * Quote from JSR 283 Section "15.12.3 Activity Storage"<p/>
+     * Quote from JSR 283 Section "15.12.3 Activity Storage"<p>
      * <p>
      * Activities are persisted as nodes of type nt:activity under system-generated
      * node names in activity storage below /jcr:system/jcr:activities.<br>
@@ -88,7 +73,7 @@ public interface VersionConstants extends JcrConstants {
     String ACTIVITIES_PATH = '/' + JCR_SYSTEM + '/' + JCR_ACTIVITIES;
 
     /**
-     * Quote from JSR 283 Section "15.13.2 Configuration Proxy Nodes"<p/>
+     * Quote from JSR 283 Section "15.13.2 Configuration Proxy Nodes"<p>
      * <p>
      * Each configuration in a given workspace is represented by a distinct proxy
      * node of type nt:configuration located in configuration storage within the
@@ -100,7 +85,7 @@ public interface VersionConstants extends JcrConstants {
     String CONFIGURATIONS_PATH = '/' + JCR_SYSTEM + '/' + JCR_CONFIGURATIONS;
 
     /**
-     * Quote from JSR 283 Section "3.13.8 Version Storage"<p/>
+     * Quote from JSR 283 Section "3.13.8 Version Storage"<p>
      * <p>
      * Version histories are stored in a single, repository-wide version storage
      * mutable and readable through the versioning API.

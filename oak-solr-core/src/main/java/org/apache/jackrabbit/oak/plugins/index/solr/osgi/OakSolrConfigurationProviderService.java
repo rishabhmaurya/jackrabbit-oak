@@ -16,13 +16,22 @@
  */
 package org.apache.jackrabbit.oak.plugins.index.solr.osgi;
 
+import java.util.Arrays;
+import java.util.Collection;
+
+import javax.annotation.CheckForNull;
+import javax.annotation.Nonnull;
+
 import org.apache.felix.scr.annotations.Activate;
 import org.apache.felix.scr.annotations.Component;
+import org.apache.felix.scr.annotations.Deactivate;
 import org.apache.felix.scr.annotations.Property;
 import org.apache.felix.scr.annotations.PropertyOption;
+import org.apache.felix.scr.annotations.PropertyUnbounded;
 import org.apache.felix.scr.annotations.Service;
+import org.apache.jackrabbit.oak.api.Type;
+import org.apache.jackrabbit.oak.commons.PropertiesUtil;
 import org.apache.jackrabbit.oak.plugins.index.solr.configuration.CommitPolicy;
-import org.apache.jackrabbit.oak.plugins.index.solr.configuration.DefaultSolrConfiguration;
 import org.apache.jackrabbit.oak.plugins.index.solr.configuration.OakSolrConfiguration;
 import org.apache.jackrabbit.oak.plugins.index.solr.configuration.OakSolrConfigurationProvider;
 import org.apache.jackrabbit.oak.plugins.index.solr.configuration.SolrServerConfigurationDefaults;
@@ -36,29 +45,19 @@ import org.osgi.service.component.ComponentContext;
 @Service(OakSolrConfigurationProvider.class)
 public class OakSolrConfigurationProviderService implements OakSolrConfigurationProvider {
 
-    private static final String DEFAULT_DESC_FIELD = SolrServerConfigurationDefaults.DESC_FIELD_NAME;
-    private static final String DEFAULT_CHILD_FIELD = SolrServerConfigurationDefaults.CHILD_FIELD_NAME;
-    private static final String DEFAULT_PARENT_FIELD = SolrServerConfigurationDefaults.ANC_FIELD_NAME;
-    private static final String DEFAULT_PATH_FIELD = SolrServerConfigurationDefaults.PATH_FIELD_NAME;
-    private static final String DEFAULT_CATCHALL_FIELD = SolrServerConfigurationDefaults.CATCHALL_FIELD;
-    private static final int DEFAULT_ROWS = SolrServerConfigurationDefaults.ROWS;
-    private static final boolean DEFAULT_PATH_RESTRICTIONS = SolrServerConfigurationDefaults.PATH_RESTRICTIONS;
-    private static final boolean DEFAULT_PROPERTY_RESTRICTIONS = SolrServerConfigurationDefaults.PROPERTY_RESTRICTIONS;
-    private static final boolean DEFAULT_PRIMARY_TYPES_RESTRICTIONS = SolrServerConfigurationDefaults.PRIMARY_TYPES;
-
-    @Property(value = DEFAULT_DESC_FIELD, label = "field for descendants search")
+    @Property(value = SolrServerConfigurationDefaults.DESC_FIELD_NAME, label = "field for descendants search")
     private static final String PATH_DESCENDANTS_FIELD = "path.desc.field";
 
-    @Property(value = DEFAULT_CHILD_FIELD, label = "field for children search")
+    @Property(value = SolrServerConfigurationDefaults.CHILD_FIELD_NAME, label = "field for children search")
     private static final String PATH_CHILDREN_FIELD = "path.child.field";
 
-    @Property(value = DEFAULT_PARENT_FIELD, label = "field for parent search")
+    @Property(value = SolrServerConfigurationDefaults.ANC_FIELD_NAME, label = "field for parent search")
     private static final String PATH_PARENT_FIELD = "path.parent.field";
 
-    @Property(value = DEFAULT_PATH_FIELD, label = "field for path search")
+    @Property(value = SolrServerConfigurationDefaults.PATH_FIELD_NAME, label = "field for path search")
     private static final String PATH_EXACT_FIELD = "path.exact.field";
 
-    @Property(value = DEFAULT_CATCHALL_FIELD,label = "catch all field")
+    @Property(value = SolrServerConfigurationDefaults.CATCHALL_FIELD, label = "catch all field")
     private static final String CATCH_ALL_FIELD = "catch.all.field";
 
     @Property(options = {
@@ -76,18 +75,35 @@ public class OakSolrConfigurationProviderService implements OakSolrConfiguration
     private static final String COMMIT_POLICY = "commit.policy";
 
 
-    @Property(intValue = DEFAULT_ROWS, label = "rows")
+    @Property(intValue = SolrServerConfigurationDefaults.ROWS, label = "rows")
     private static final String ROWS = "rows";
 
-
-    @Property(boolValue = DEFAULT_PATH_RESTRICTIONS, label = "path restrictions")
+    @Property(boolValue = SolrServerConfigurationDefaults.PATH_RESTRICTIONS, label = "path restrictions")
     private static final String PATH_RESTRICTIONS = "path.restrictions";
 
-    @Property(boolValue = DEFAULT_PROPERTY_RESTRICTIONS, label = "property restrictions")
+    @Property(boolValue = SolrServerConfigurationDefaults.PROPERTY_RESTRICTIONS, label = "property restrictions")
     private static final String PROPERTY_RESTRICTIONS = "property.restrictions";
 
-    @Property(boolValue = DEFAULT_PRIMARY_TYPES_RESTRICTIONS, label = "primary types restrictions")
+    @Property(boolValue = SolrServerConfigurationDefaults.PRIMARY_TYPES, label = "primary types restrictions")
     private static final String PRIMARY_TYPES_RESTRICTIONS = "primarytypes.restrictions";
+
+    @Property(value = SolrServerConfigurationDefaults.IGNORED_PROPERTIES, label = "ignored properties",
+            unbounded = PropertyUnbounded.ARRAY)
+    private static final String IGNORED_PROPERTIES = "ignored.properties";
+
+    @Property(label = "used properties",
+            unbounded = PropertyUnbounded.ARRAY)
+    private static final String USED_PROPERTIES = "used.properties";
+
+    @Property(value = SolrServerConfigurationDefaults.TYPE_MAPPINGS, cardinality = 13, description =
+            "each item should be in the form TypeString=FieldName (e.g. STRING=text_general)", label =
+            "mappings from Oak Types to Solr fields")
+    private static final String TYPE_MAPPINGS = "type.mappings";
+
+    @Property(value = SolrServerConfigurationDefaults.PROPERTY_MAPPINGS, unbounded = PropertyUnbounded.ARRAY, description =
+            "each item should be in the form PropertyName=FieldName (e.g. jcr:title=text_en)", label =
+            "mappings from JCR property names to Solr fields")
+    private static final String PROPERTY_MAPPINGS = "property.mappings";
 
     private String pathChildrenFieldName;
     private String pathParentFieldName;
@@ -99,9 +115,12 @@ public class OakSolrConfigurationProviderService implements OakSolrConfiguration
     private boolean useForPathRestrictions;
     private boolean useForPropertyRestrictions;
     private boolean useForPrimaryTypes;
+    private String[] ignoredProperties;
+    private String[] usedProperties;
+    private String[] typeMappings;
+    private String[] propertyMappings;
 
     private OakSolrConfiguration oakSolrConfiguration;
-
 
     @Activate
     protected void activate(ComponentContext componentContext) throws Exception {
@@ -115,19 +134,57 @@ public class OakSolrConfigurationProviderService implements OakSolrConfiguration
         useForPathRestrictions = Boolean.valueOf(String.valueOf(componentContext.getProperties().get(PATH_RESTRICTIONS)));
         useForPropertyRestrictions = Boolean.valueOf(String.valueOf(componentContext.getProperties().get(PROPERTY_RESTRICTIONS)));
         useForPrimaryTypes = Boolean.valueOf(String.valueOf(componentContext.getProperties().get(PRIMARY_TYPES_RESTRICTIONS)));
+        typeMappings = PropertiesUtil.toStringArray(componentContext.getProperties().get(TYPE_MAPPINGS));
+        ignoredProperties = PropertiesUtil.toStringArray(componentContext.getProperties().get(IGNORED_PROPERTIES));
+        usedProperties = PropertiesUtil.toStringArray(componentContext.getProperties().get(USED_PROPERTIES));
+        propertyMappings = PropertiesUtil.toStringArray(componentContext.getProperties().get(PROPERTY_MAPPINGS));
     }
 
+    @Deactivate
+    protected void deactivate() {
+        oakSolrConfiguration = null;
+    }
+
+    @Nonnull
     @Override
     public OakSolrConfiguration getConfiguration() {
         if (oakSolrConfiguration == null) {
-            // extend DefaultOakSolrConfiguration
-            oakSolrConfiguration = new DefaultSolrConfiguration() {
+            oakSolrConfiguration = new OakSolrConfiguration() {
 
+                @Override
+                public String getFieldNameFor(Type<?> propertyType) {
+                    for (String typeMapping : typeMappings) {
+                        String[] mapping = typeMapping.split("=");
+                        if (mapping.length == 2 && mapping[0] != null && mapping[1] != null) {
+                            Type<?> type = Type.fromString(mapping[0]);
+                            if (type != null && type.tag() == propertyType.tag()) {
+                                return mapping[1];
+                            }
+                        }
+                    }
+                    return null;
+                }
+
+                @Override
+                public String getFieldForPropertyRestriction(Filter.PropertyRestriction propertyRestriction) {
+                    for (String propertyMapping : propertyMappings) {
+                        String[] mapping = propertyMapping.split("=");
+                        if (mapping.length == 2 && mapping[0] != null && mapping[1] != null) {
+                            if (mapping[0].equals(propertyRestriction.propertyName)) {
+                                return mapping[1];
+                            }
+                        }
+                    }
+                    return null;
+                }
+
+                @Nonnull
                 @Override
                 public String getPathField() {
                     return pathExactFieldName;
                 }
 
+                @CheckForNull
                 @Override
                 public String getFieldForPathRestriction(Filter.PathRestriction pathRestriction) {
                     String fieldName = null;
@@ -157,6 +214,7 @@ public class OakSolrConfigurationProviderService implements OakSolrConfiguration
                     return fieldName;
                 }
 
+                @Nonnull
                 @Override
                 public CommitPolicy getCommitPolicy() {
                     return commitPolicy;
@@ -185,6 +243,18 @@ public class OakSolrConfigurationProviderService implements OakSolrConfiguration
                 @Override
                 public boolean useForPathRestrictions() {
                     return useForPathRestrictions;
+                }
+
+                @Nonnull
+                @Override
+                public Collection<String> getIgnoredProperties() {
+                    return Arrays.asList(ignoredProperties);
+                }
+
+                @Nonnull
+                @Override
+                public Collection<String> getUsedProperties() {
+                    return Arrays.asList(usedProperties);
                 }
             };
         }

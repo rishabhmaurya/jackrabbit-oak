@@ -36,8 +36,11 @@ public class SolrServerConfigurationDefaults {
 
     public static final String CATCHALL_FIELD = "catch_all";
 
-    public static final int ROWS = 100000;
+    public static final int ROWS = 50;
     public static final boolean PROPERTY_RESTRICTIONS = false;
     public static final boolean PATH_RESTRICTIONS = false;
     public static final boolean PRIMARY_TYPES = false;
+    public static final String IGNORED_PROPERTIES = "";
+    public static final String TYPE_MAPPINGS = "";
+    public static final String PROPERTY_MAPPINGS = "";
 }

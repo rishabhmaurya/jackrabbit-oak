@@ -23,8 +23,16 @@ import org.apache.jackrabbit.oak.api.Type;
 
 import com.google.common.collect.ComparisonChain;
 
+/**
+ * A property definition within a template (the property name, the type, and the
+ * index within the list of properties for the given node).
+ */
 class PropertyTemplate implements Comparable<PropertyTemplate> {
 
+    /**
+     * The index of this property within the list of properties in the node
+     * template.
+     */
     private final int index;
 
     private final String name;
@@ -39,7 +47,7 @@ class PropertyTemplate implements Comparable<PropertyTemplate> {
 
     PropertyTemplate(PropertyState state) {
         checkNotNull(state);
-        this.index = 0; // TODO: is this used anywhere
+        this.index = 0;
         this.name = state.getName();
         this.type = state.getType();
     }

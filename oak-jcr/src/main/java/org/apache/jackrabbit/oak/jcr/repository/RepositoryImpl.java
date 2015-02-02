@@ -21,13 +21,16 @@ import static java.util.Collections.emptyMap;
 import static java.util.Collections.singletonMap;
 import static org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardUtils.registerMBean;
 
+import java.io.Closeable;
 import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
@@ -41,6 +44,8 @@ import javax.jcr.Value;
 import javax.security.auth.login.LoginException;
 
 import com.google.common.collect.ImmutableMap;
+
+import org.apache.commons.io.IOUtils;
 import org.apache.jackrabbit.api.JackrabbitRepository;
 import org.apache.jackrabbit.api.security.authentication.token.TokenCredentials;
 import org.apache.jackrabbit.commons.SimpleValueFactory;
@@ -287,6 +292,9 @@ public class RepositoryImpl implements JackrabbitRepository {
     public void shutdown() {
         statisticManager.dispose();
         scheduledExecutor.shutdown();
+        if (contentRepository instanceof Closeable) {
+            IOUtils.closeQuietly((Closeable) contentRepository);
+        }
     }
 
     //------------------------------------------------------------< internal >---
@@ -326,7 +334,20 @@ public class RepositoryImpl implements JackrabbitRepository {
     //------------------------------------------------------------< private >---
 
     private static ScheduledExecutorService createListeningScheduledExecutorService() {
-        return new ScheduledThreadPoolExecutor(1) {
+        ThreadFactory tf = new ThreadFactory() {
+            private final AtomicLong counter = new AtomicLong();
+            @Override
+            public Thread newThread(@Nonnull Runnable r) {
+                Thread t = new Thread(r, newName());
+                t.setDaemon(true);
+                return t;
+            }
+
+            private String newName() {
+                return "oak-repository-executor-" + counter.incrementAndGet();
+            }
+        };
+        return new ScheduledThreadPoolExecutor(1, tf) {
             // purge the list of schedule tasks before scheduling a new task in order
             // to reduce memory consumption in the face of many cancelled tasks. See OAK-1890.
 

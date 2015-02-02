@@ -26,6 +26,7 @@ import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.annotation.Nullable;
 
@@ -664,8 +665,10 @@ public class CacheLIRS<K, V> implements LoadingCache<K, V> {
         private int stackSize;
 
         /**
-         * The stack of recently referenced elements. This includes all hot entries,
-         * the recently referenced cold entries, and all non-resident cold entries.
+         * The stack of recently referenced elements. This includes all hot
+         * entries, and the recently referenced cold entries. Resident cold
+         * entries that were not recently referenced, as well as non-resident
+         * cold entries, are not in the stack.
          * <p>
          * There is always at least one entry: the head entry.
          */
@@ -689,6 +692,11 @@ public class CacheLIRS<K, V> implements LoadingCache<K, V> {
          * The number of times any item was moved to the top of the stack.
          */
         private int stackMoveCounter;
+        
+        /**
+         * Whether the current segment is currently calling a value loader.
+         */
+        private AtomicBoolean isLoading = new AtomicBoolean();
 
         /**
          * Create a new cache.
@@ -833,30 +841,71 @@ public class CacheLIRS<K, V> implements LoadingCache<K, V> {
             }
         }
         
-        synchronized V get(K key, int hash, Callable<? extends V> valueLoader) throws ExecutionException {
-            V value = get(key, hash);
-            if (value == null) {
-                long start = System.nanoTime();
-                try {
-                    value = valueLoader.call();
-                    loadSuccessCount++;
-                } catch (Exception e) {
-                    loadExceptionCount++;
-                    throw new ExecutionException(e);
-                } finally {
-                    long time = System.nanoTime() - start;
-                    totalLoadTime += time;
+        V get(K key, int hash, Callable<? extends V> valueLoader) throws ExecutionException {
+            // we can not synchronize on a per-segment object while loading, as
+            // the value loader could access the cache (for example, using put,
+            // or another get with a loader), which might result in a deadlock
+            
+            // for at most 100 ms (100 x 1 ms), we avoid concurrent loading of
+            // multiple values in the same segment
+            for (int i = 0; i < 100; i++) {
+                V value = get(key, hash);
+                if (value != null) {
+                    return value;
                 }
-                put(key, hash, value, cache.sizeOf(key, value));
+                if (!isLoading.getAndSet(true)) {
+                    value = load(key, hash, valueLoader);
+                    isLoading.set(false);
+                    synchronized (isLoading) {
+                        // notify the other thread
+                        isLoading.notifyAll();
+                    }
+                } else {
+                    // wait a bit, but at most until the other thread completed
+                    // loading
+                    synchronized (isLoading) {
+                        try {
+                            isLoading.wait(1);
+                        } catch (InterruptedException e) {
+                            // ignore
+                        }
+                    }
+                }
             }
+            // give up (that means, the same value might be loaded concurrently)
+            return load(key, hash, valueLoader);
+        }
+            
+        V load(K key, int hash, Callable<? extends V> valueLoader) throws ExecutionException {
+            V value;
+            long start = System.nanoTime();
+            try {
+                value = valueLoader.call();
+                loadSuccessCount++;
+            } catch (Exception e) {
+                loadExceptionCount++;
+                throw new ExecutionException(e);
+            } finally {
+                long time = System.nanoTime() - start;
+                totalLoadTime += time;
+            }
+            put(key, hash, value, cache.sizeOf(key, value));
             return value;
         }
         
-        synchronized V get(K key, int hash, CacheLoader<K, V> loader) throws ExecutionException {
+        V get(K key, int hash, CacheLoader<K, V> loader) throws ExecutionException {
+            // avoid synchronization if it's in the cache
             V value = get(key, hash);
-            if (value == null) {
-                if (loader == null) {
-                    return null;
+            if (value != null) {
+                return value;
+            }
+            if (loader == null) {
+                return null;
+            }
+            synchronized (this) {
+                value = get(key, hash);
+                if (value != null) {
+                    return value;
                 }
                 long start = System.nanoTime();
                 try {
@@ -870,8 +919,8 @@ public class CacheLIRS<K, V> implements LoadingCache<K, V> {
                     totalLoadTime += time;
                 }
                 put(key, hash, value, cache.sizeOf(key, value));
+                return value;
             }
-            return value;
         }
         
         synchronized V replace(K key, int hash, V value, int memory) {

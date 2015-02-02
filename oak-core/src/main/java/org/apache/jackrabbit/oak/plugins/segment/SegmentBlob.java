@@ -17,6 +17,8 @@
 package org.apache.jackrabbit.oak.plugins.segment;
 
 import static com.google.common.base.Charsets.UTF_8;
+import static com.google.common.collect.Sets.newIdentityHashSet;
+import static java.util.Collections.emptySet;
 import static org.apache.jackrabbit.oak.plugins.segment.Segment.MEDIUM_LIMIT;
 import static org.apache.jackrabbit.oak.plugins.segment.Segment.SMALL_LIMIT;
 import static org.apache.jackrabbit.oak.plugins.segment.SegmentWriter.BLOCK_SIZE;
@@ -24,6 +26,7 @@ import static org.apache.jackrabbit.oak.plugins.segment.SegmentWriter.BLOCK_SIZE
 import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Set;
 
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
@@ -32,7 +35,18 @@ import org.apache.jackrabbit.oak.api.Blob;
 import org.apache.jackrabbit.oak.plugins.memory.AbstractBlob;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 
+/**
+ * A BLOB (stream of bytes). This is a record of type "VALUE".
+ */
 public class SegmentBlob extends Record implements Blob {
+
+    public static Iterable<SegmentId> getBulkSegmentIds(Blob blob) {
+        if (blob instanceof SegmentBlob) {
+            return ((SegmentBlob) blob).getBulkSegmentIds();
+        } else {
+            return emptySet();
+        }
+    }
 
     SegmentBlob(RecordId id) {
         super(id);
@@ -114,7 +128,7 @@ public class SegmentBlob extends Record implements Blob {
                     getStore().getBlobStore();
             if (blobStore != null) {
                 return blobStore.getReference(blobId);
-            }else{
+            } else {
                 throw new IllegalStateException("Attempt to read external blob with blobId [" + blobId + "] " +
                         "without specifying BlobStore");
             }
@@ -148,7 +162,7 @@ public class SegmentBlob extends Record implements Blob {
         }
     }
 
-    public SegmentBlob clone(SegmentWriter writer) throws IOException {
+    public SegmentBlob clone(SegmentWriter writer, boolean cloneLargeBinaries) throws IOException {
         Segment segment = getSegment();
         int offset = getOffset();
         byte head = segment.readByte(offset);
@@ -160,11 +174,18 @@ public class SegmentBlob extends Record implements Blob {
             return writer.writeStream(new BufferedInputStream(getNewStream()));
         } else if ((head & 0xe0) == 0xc0) {
             // 110x xxxx: long value
-            long length = (segment.readLong(offset) & 0x1fffffffffffffffL) + MEDIUM_LIMIT;
-            int listSize = (int) ((length + BLOCK_SIZE - 1) / BLOCK_SIZE);
-            ListRecord list = new ListRecord(
-                    segment.readRecordId(offset + 8), listSize);
-            return writer.writeLargeBlob(length, list.getEntries());
+            if (cloneLargeBinaries) {
+                return writer.writeStream(new BufferedInputStream(
+                        getNewStream()));
+            } else {
+                // this was the previous (default) behavior
+                long length = (segment.readLong(offset) & 0x1fffffffffffffffL)
+                        + MEDIUM_LIMIT;
+                int listSize = (int) ((length + BLOCK_SIZE - 1) / BLOCK_SIZE);
+                ListRecord list = new ListRecord(
+                        segment.readRecordId(offset + 8), listSize);
+                return writer.writeLargeBlob(length, list.getEntries());
+            }
         } else if ((head & 0xf0) == 0xe0) {
             // 1110 xxxx: external value
             return writer.writeExternalBlob(getBlobId());
@@ -180,13 +201,14 @@ public class SegmentBlob extends Record implements Blob {
     public boolean equals(Object object) {
         if (object == this || fastEquals(this, object)) {
             return true;
-        } else if (object instanceof SegmentBlob
-                && wasCompactedTo((SegmentBlob) object)) {
-            return true;
-        } else {
-            return object instanceof Blob
-                    && AbstractBlob.equal(this, (Blob) object);
+        } else if (object instanceof SegmentBlob) {
+            SegmentBlob that = (SegmentBlob) object;
+            if (this.wasCompactedTo(that) || that.wasCompactedTo(this)) {
+                return true;
+            }
         }
+        return object instanceof Blob
+                && AbstractBlob.equal(this, (Blob) object);
     }
 
     @Override
@@ -202,6 +224,26 @@ public class SegmentBlob extends Record implements Blob {
         byte[] bytes = new byte[length];
         segment.readBytes(offset + 2, bytes, 0, length);
         return new String(bytes, UTF_8);
+    }
+
+    private Iterable<SegmentId> getBulkSegmentIds() {
+        Segment segment = getSegment();
+        int offset = getOffset();
+        byte head = segment.readByte(offset);
+        if ((head & 0xe0) == 0xc0) {
+            // 110x xxxx: long value
+            long length = (segment.readLong(offset) & 0x1fffffffffffffffL) + MEDIUM_LIMIT;
+            int listSize = (int) ((length + BLOCK_SIZE - 1) / BLOCK_SIZE);
+            ListRecord list = new ListRecord(
+                    segment.readRecordId(offset + 8), listSize);
+            Set<SegmentId> ids = newIdentityHashSet();
+            for (RecordId id : list.getEntries()) {
+                ids.add(id.getSegmentId());
+            }
+            return ids;
+        } else {
+            return emptySet();
+        }
     }
 
 }

@@ -16,11 +16,14 @@
  */
 package org.apache.jackrabbit.oak.plugins.document;
 
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 
 import org.apache.jackrabbit.oak.cache.CacheStats;
-import org.apache.jackrabbit.oak.cache.CacheValue;
 import org.apache.jackrabbit.oak.plugins.document.util.StringValue;
 
 import com.google.common.cache.Cache;
@@ -30,19 +33,19 @@ import static com.google.common.base.Preconditions.checkNotNull;
 /**
  * An in-memory diff cache implementation.
  */
-class MemoryDiffCache implements DiffCache {
+public class MemoryDiffCache implements DiffCache {
 
     /**
      * Diff cache.
      *
      * Key: PathRev, value: StringValue
      */
-    protected final Cache<CacheValue, StringValue> diffCache;
+    protected final Cache<PathRev, StringValue> diffCache;
     protected final CacheStats diffCacheStats;
 
 
-    MemoryDiffCache(DocumentMK.Builder builder) {
-        diffCache = builder.buildCache(builder.getDiffCacheSize());
+    protected MemoryDiffCache(DocumentMK.Builder builder) {
+        diffCache = builder.buildDiffCache();
         diffCacheStats = new CacheStats(diffCache, "Document-Diff",
                 builder.getWeigher(), builder.getDiffCacheSize());
     }
@@ -51,9 +54,25 @@ class MemoryDiffCache implements DiffCache {
     @Override
     public String getChanges(@Nonnull Revision from,
                              @Nonnull Revision to,
-                             @Nonnull String path) {
+                             @Nonnull String path,
+                             final @Nullable Loader loader) {
         PathRev key = diffCacheKey(path, from, to);
-        StringValue diff = diffCache.getIfPresent(key);
+        StringValue diff;
+        if (loader == null) {
+            diff = diffCache.getIfPresent(key);
+        } else {
+            try {
+                diff = diffCache.get(key, new Callable<StringValue>() {
+                    @Override
+                    public StringValue call() throws Exception {
+                        return new StringValue(loader.call());
+                    }
+                });
+            } catch (ExecutionException e) {
+                // try again with loader directly
+                diff = new StringValue(loader.call());
+            }
+        }
         return diff != null ? diff.toString() : null;
     }
 
@@ -85,7 +104,8 @@ class MemoryDiffCache implements DiffCache {
         }
 
         @Override
-        public void done() {
+        public boolean done() {
+            return true;
         }
     }
 

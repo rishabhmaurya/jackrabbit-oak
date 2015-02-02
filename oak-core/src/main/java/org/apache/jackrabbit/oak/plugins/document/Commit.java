@@ -28,6 +28,7 @@ import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
+import com.google.common.base.Function;
 import com.google.common.collect.Sets;
 import org.apache.jackrabbit.oak.commons.json.JsopStream;
 import org.apache.jackrabbit.oak.commons.json.JsopWriter;
@@ -36,6 +37,10 @@ import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.collect.Iterables.filter;
+import static com.google.common.collect.Iterables.transform;
+import static org.apache.jackrabbit.oak.commons.PathUtils.denotesRoot;
 import static org.apache.jackrabbit.oak.plugins.document.Collection.NODES;
 import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.COLLISIONS;
 import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.SPLIT_CANDIDATE_THRESHOLD;
@@ -48,6 +53,7 @@ public class Commit {
     private static final Logger LOG = LoggerFactory.getLogger(Commit.class);
 
     private final DocumentNodeStore nodeStore;
+    private final DocumentNodeStoreBranch branch;
     private final Revision baseRevision;
     private final Revision revision;
     private HashMap<String, UpdateOp> operations = new LinkedHashMap<String, UpdateOp>();
@@ -66,10 +72,25 @@ public class Commit {
     /** Set of all nodes which have binary properties. **/
     private HashSet<String> nodesWithBinaries = Sets.newHashSet();
 
-    Commit(DocumentNodeStore nodeStore, Revision baseRevision, Revision revision) {
+    /**
+     * Create a new Commit.
+     *  
+     * @param nodeStore the node store.
+     * @param revision the revision for this commit.
+     * @param baseRevision the base revision for this commit or {@code null} if
+     *                     there is none.
+     * @param branch the branch associated with this commit or {@code null} if
+     *               there is none.
+     *                              
+     */
+    Commit(@Nonnull DocumentNodeStore nodeStore,
+           @Nonnull Revision revision,
+           @Nullable Revision baseRevision,
+           @Nullable DocumentNodeStoreBranch branch) {
+        this.nodeStore = checkNotNull(nodeStore);
+        this.revision = checkNotNull(revision);
         this.baseRevision = baseRevision;
-        this.revision = revision;
-        this.nodeStore = nodeStore;
+        this.branch = branch;
     }
 
     UpdateOp getUpdateOperationForNode(String path) {
@@ -158,7 +179,8 @@ public class Commit {
             Branch b = nodeStore.getBranches().getBranch(baseRev);
             if (b == null) {
                 // baseRev is marker for new branch
-                b = nodeStore.getBranches().create(baseRev.asTrunkRevision(), rev);
+                b = nodeStore.getBranches().create(
+                        baseRev.asTrunkRevision(), rev, branch);
             } else {
                 b.addCommit(rev);
             }
@@ -256,7 +278,7 @@ public class Commit {
             } else {
                 while (!PathUtils.isAncestor(commitRootPath, p)) {
                     commitRootPath = PathUtils.getParentPath(commitRootPath);
-                    if (PathUtils.denotesRoot(commitRootPath)) {
+                    if (denotesRoot(commitRootPath)) {
                         break;
                     }
                 }
@@ -280,12 +302,6 @@ public class Commit {
             } else {
                 NodeDocument.setCommitRoot(op, revision, commitRootDepth);
                 if (op.isNew()) {
-                    if (baseBranchRevision == null) {
-                        // for new non-branch nodes we can safely set _lastRev on
-                        // insert. for existing nodes the _lastRev is updated by
-                        // the background thread to avoid concurrent updates
-                        NodeDocument.setLastRev(op, revision);
-                    }
                     newNodes.add(op);
                 } else {
                     changedNodes.add(op);
@@ -297,7 +313,6 @@ public class Commit {
             // it is the root of a subtree added in a commit.
             // so we try to add the root like all other nodes
             NodeDocument.setRevision(commitRoot, revision, commitValue);
-            NodeDocument.setLastRev(commitRoot, revision);
             newNodes.add(commitRoot);
         }
         try {
@@ -312,9 +327,6 @@ public class Commit {
                             // (because there might be a conflict)
                             NodeDocument.unsetRevision(commitRoot, revision);
                         }
-                        // setting _lastRev is only safe on insert. now the
-                        // background thread needs to take care of it
-                        NodeDocument.unsetLastRev(op, revision.getClusterId());
                         changedNodes.add(op);
                     }
                     newNodes.clear();
@@ -379,10 +391,9 @@ public class Commit {
     }
 
     private void updateParentChildStatus() {
-        final DocumentStore store = nodeStore.getDocumentStore();
         final Set<String> processedParents = Sets.newHashSet();
         for (String path : addedNodes) {
-            if (PathUtils.denotesRoot(path)) {
+            if (denotesRoot(path)) {
                 continue;
             }
 
@@ -393,29 +404,8 @@ public class Commit {
             }
 
             processedParents.add(parentPath);
-            final UpdateOp op = operations.get(parentPath);
-            if (op != null) {
-                //Parent node all ready part of modification list
-                //Update it in place
-                if (op.isNew()) {
-                    NodeDocument.setChildrenFlag(op, true);
-                } else {
-                    NodeDocument nd = store.getIfCached(NODES, Utils.getIdFromPath(parentPath));
-                    if (nd != null && nd.hasChildren()) {
-                        continue;
-                    }
-                    NodeDocument.setChildrenFlag(op, true);
-                }
-            } else {
-                NodeDocument nd = store.getIfCached(NODES, Utils.getIdFromPath(parentPath));
-                if (nd != null && nd.hasChildren()) {
-                    //Flag already set to true. Nothing to do
-                    continue;
-                } else {
-                    UpdateOp updateParentOp = getUpdateOperationForNode(parentPath);
-                    NodeDocument.setChildrenFlag(updateParentOp, true);
-                }
-            }
+            UpdateOp op = getUpdateOperationForNode(parentPath);
+            NodeDocument.setChildrenFlag(op, true);
         }
     }
 
@@ -429,7 +419,6 @@ public class Commit {
         }
         for (UpdateOp op : newDocuments) {
             UpdateOp reverse = op.getReverseOperation();
-            NodeDocument.unsetLastRev(reverse, revision.getClusterId());
             store.findAndUpdate(NODES, reverse);
         }
         UpdateOp removeCollision = new UpdateOp(commitRoot.getId(), false);
@@ -564,7 +553,7 @@ public class Commit {
     public void applyToCache(Revision before, boolean isBranchCommit) {
         HashMap<String, ArrayList<String>> nodesWithChangedChildren = new HashMap<String, ArrayList<String>>();
         for (String p : modifiedNodes) {
-            if (PathUtils.denotesRoot(p)) {
+            if (denotesRoot(p)) {
                 continue;
             }
             String parent = PathUtils.getParentPath(p);
@@ -576,6 +565,7 @@ public class Commit {
             list.add(p);
         }
         DiffCache.Entry cacheEntry = nodeStore.getDiffCache().newEntry(before, revision);
+        LastRevTracker tracker = nodeStore.createTracker(revision, isBranchCommit);
         List<String> added = new ArrayList<String>();
         List<String> removed = new ArrayList<String>();
         List<String> changed = new ArrayList<String>();
@@ -597,10 +587,12 @@ public class Commit {
             }
             UpdateOp op = operations.get(path);
             boolean isNew = op != null && op.isNew();
-            boolean pendingLastRev = op == null
-                    || !NodeDocument.hasLastRev(op, revision.getClusterId());
-            nodeStore.applyChanges(revision, path, isNew, pendingLastRev,
-                    isBranchCommit, added, removed, changed, cacheEntry);
+            if (op == null || !hasContentChanges(op) || denotesRoot(path)) {
+                // track intermediate node and root
+                tracker.track(path);
+            }
+            nodeStore.applyChanges(revision, path, isNew,
+                    added, removed, changed, cacheEntry);
         }
         cacheEntry.done();
     }
@@ -614,14 +606,14 @@ public class Commit {
     }
 
     private void markChanged(String path) {
-        if (!PathUtils.denotesRoot(path) && !PathUtils.isAbsolute(path)) {
+        if (!denotesRoot(path) && !PathUtils.isAbsolute(path)) {
             throw new IllegalArgumentException("path: " + path);
         }
         while (true) {
             if (!modifiedNodes.add(path)) {
                 break;
             }
-            if (PathUtils.denotesRoot(path)) {
+            if (denotesRoot(path)) {
                 break;
             }
             path = PathUtils.getParentPath(path);
@@ -643,4 +635,16 @@ public class Commit {
         NodeDocument.setDeleted(op, revision, true);
     }
 
+    private static final Function<UpdateOp.Key, String> KEY_TO_NAME =
+            new Function<UpdateOp.Key, String>() {
+        @Override
+        public String apply(UpdateOp.Key input) {
+            return input.getName();
+        }
+    };
+
+    private static boolean hasContentChanges(UpdateOp op) {
+        return filter(transform(op.getChanges().keySet(),
+                KEY_TO_NAME), Utils.PROPERTY_OR_DELETED).iterator().hasNext();
+    }
 }

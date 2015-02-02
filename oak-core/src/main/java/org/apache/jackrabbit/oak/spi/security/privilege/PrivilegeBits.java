@@ -382,7 +382,7 @@ public final class PrivilegeBits implements PrivilegeConstants {
             ((ModifiableData) d).add(other.d);
             return this;
         } else {
-            throw new UnsupportedOperationException("immutable privilege bits");
+            throw unsupported();
         }
     }
 
@@ -402,7 +402,7 @@ public final class PrivilegeBits implements PrivilegeConstants {
             ((ModifiableData) d).diff(other.d);
             return this;
         } else {
-            throw new UnsupportedOperationException("immutable privilege bits");
+            throw unsupported();
         }
     }
 
@@ -421,7 +421,25 @@ public final class PrivilegeBits implements PrivilegeConstants {
             ((ModifiableData) d).addDifference(a.d, b.d);
             return this;
         } else {
-            throw new UnsupportedOperationException("immutable privilege bits");
+            throw unsupported();
+        }
+    }
+
+    /**
+     * Retains the elements in this {@code PrivilegeBits} that are contained in
+     * the specified other {@code PrivilegeBits}.
+     *
+     * @param other Other privilege bits.
+     * @return This modifiable instance of privilege bits modified such it contains
+     * only privileges that were also contained in the {@code other} instance.
+     */
+    @Nonnull
+    public PrivilegeBits retain(@Nonnull PrivilegeBits other) {
+        if (d instanceof ModifiableData) {
+            ((ModifiableData) d).retain(other.d);
+            return this;
+        }  else {
+            throw unsupported();
         }
     }
 
@@ -431,10 +449,9 @@ public final class PrivilegeBits implements PrivilegeConstants {
     }
 
     /**
-     * Package private method to calculate the privilege bits associated with a
-     * given built-in or custom privilege definition.
+     * Method to calculate the next privilege bits associated with this instance.
      *
-     * @return an instance of {@code PrivilegeBits}
+     * @return an new instance of {@code PrivilegeBits}
      */
     @Nonnull
     public PrivilegeBits nextBits() {
@@ -453,6 +470,10 @@ public final class PrivilegeBits implements PrivilegeConstants {
     public void writeTo(@Nonnull Tree tree) {
         String name = (REP_PRIVILEGES.equals(tree.getName())) ? REP_NEXT : REP_BITS;
         tree.setProperty(asPropertyState(name));
+    }
+
+    private static UnsupportedOperationException unsupported() {
+        return new UnsupportedOperationException("immutable privilege bits");
     }
 
     //-------------------------------------------------------------< Object >---
@@ -750,6 +771,33 @@ public final class PrivilegeBits implements PrivilegeConstants {
             }
             for (int i = 0; i < b.length; i++) {
                 bits[i] |= b[i];
+            }
+        }
+
+        private void retain(Data other) {
+            if (isSimple()) {
+                bits[0] &= other.longValue();
+            } else {
+                long[] lvs = longValues();
+                long[] bLvs = other.longValues();
+
+                long[] res = (lvs.length <= bLvs.length) ? new long[lvs.length] : new long[bLvs.length];
+                int compactSize = -1;
+                for (int i = 0; i < res.length; i++) {
+                    res[i] = (lvs[i] & bLvs[i]);
+                    if (res[i] == 0) {
+                        if (compactSize == -1) {
+                            compactSize = i+1;
+                        }
+                    } else {
+                        compactSize = -1;
+                    }
+                }
+                if (compactSize != -1 && res.length > compactSize) {
+                    bits = Arrays.copyOfRange(res, 0, compactSize);
+                } else {
+                    bits = res;
+                }
             }
         }
 

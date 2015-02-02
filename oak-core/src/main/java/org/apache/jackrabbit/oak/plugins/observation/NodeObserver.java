@@ -20,6 +20,7 @@
 package org.apache.jackrabbit.oak.plugins.observation;
 
 import static java.util.Collections.addAll;
+import static org.apache.jackrabbit.oak.plugins.observation.filter.VisibleFilter.VISIBLE_FILTER;
 
 import java.util.Map;
 import java.util.Set;
@@ -32,11 +33,10 @@ import com.google.common.collect.Sets;
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.commons.PathUtils;
-import org.apache.jackrabbit.oak.core.ImmutableRoot;
 import org.apache.jackrabbit.oak.namepath.GlobalNameMapper;
 import org.apache.jackrabbit.oak.namepath.NamePathMapper;
 import org.apache.jackrabbit.oak.namepath.NamePathMapperImpl;
-import org.apache.jackrabbit.oak.plugins.observation.filter.VisibleFilter;
+import org.apache.jackrabbit.oak.plugins.tree.RootFactory;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.Observer;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
@@ -119,40 +119,44 @@ public abstract class NodeObserver implements Observer {
     @Override
     public void contentChanged(@Nonnull NodeState root, @Nullable CommitInfo info) {
         if (previousRoot != null) {
-            NamePathMapper namePathMapper = new NamePathMapperImpl(
-                    new GlobalNameMapper(new ImmutableRoot(root)));
+            try {
+                NamePathMapper namePathMapper = new NamePathMapperImpl(
+                        new GlobalNameMapper(RootFactory.createReadOnlyRoot(root)));
 
-            Set<String> oakPropertyNames = Sets.newHashSet();
-            for (String name : propertyNames) {
-                String oakName = namePathMapper.getOakNameOrNull(name);
-                if (oakName == null) {
-                    LOG.warn("Ignoring invalid property name: {}", name);
-                } else {
-                    oakPropertyNames.add(oakName);
+                Set<String> oakPropertyNames = Sets.newHashSet();
+                for (String name : propertyNames) {
+                    String oakName = namePathMapper.getOakNameOrNull(name);
+                    if (oakName == null) {
+                        LOG.warn("Ignoring invalid property name: {}", name);
+                    } else {
+                        oakPropertyNames.add(oakName);
+                    }
                 }
-            }
 
-            NodeState before = previousRoot;
-            NodeState after = root;
-            EventHandler handler = new FilteredHandler(
-                    new VisibleFilter(),
-                    new NodeEventHandler("/", info, namePathMapper, oakPropertyNames));
+                NodeState before = previousRoot;
+                NodeState after = root;
+                EventHandler handler = new FilteredHandler(
+                        VISIBLE_FILTER,
+                        new NodeEventHandler("/", info, namePathMapper, oakPropertyNames));
 
-            String oakPath = namePathMapper.getOakPath(path);
-            if (oakPath == null) {
-                LOG.warn("Cannot listen for changes on invalid path: {}", path);
-                return;
-            }
+                String oakPath = namePathMapper.getOakPath(path);
+                if (oakPath == null) {
+                    LOG.warn("Cannot listen for changes on invalid path: {}", path);
+                    return;
+                }
 
-            for (String oakName : PathUtils.elements(oakPath)) {
-                before = before.getChildNode(oakName);
-                after = after.getChildNode(oakName);
-                handler = handler.getChildHandler(oakName, before, after);
-            }
+                for (String oakName : PathUtils.elements(oakPath)) {
+                    before = before.getChildNode(oakName);
+                    after = after.getChildNode(oakName);
+                    handler = handler.getChildHandler(oakName, before, after);
+                }
 
-            EventGenerator generator = new EventGenerator(before, after, handler);
-            while (!generator.isDone()) {
-                generator.generate();
+                EventGenerator generator = new EventGenerator(before, after, handler);
+                while (!generator.isDone()) {
+                    generator.generate();
+                }
+            } catch (Exception e) {
+                LOG.warn("Error while dispatching observation events", e);
             }
         }
 

@@ -50,8 +50,14 @@ public class QueryPlanTest extends AbstractRepositoryTest {
     public void propertyIndexVersusNodeTypeIndex() throws Exception {
         Session session = getAdminSession();
         Node nt = session.getRootNode().getNode("oak:index").getNode("nodetype");
-        nt.setProperty("entryCount", Long.MAX_VALUE);
+        nt.setProperty("entryCount", 200);
+        Node uuid = session.getRootNode().getNode("oak:index").getNode("uuid");
+        uuid.setProperty("entryCount", 100);
         QueryManager qm = session.getWorkspace().getQueryManager();
+        if (session.getRootNode().hasNode("testroot")) {
+            session.getRootNode().getNode("testroot").remove();
+            session.save();
+        }
         Node testRootNode = session.getRootNode().addNode("testroot");
         for (int i = 0; i < 100; i++) {
             Node n = testRootNode.addNode("n" + i, "oak:Unstructured");
@@ -63,7 +69,7 @@ public class QueryPlanTest extends AbstractRepositoryTest {
         QueryResult result;
         RowIterator it;
 
-        String xpath = "/jcr:root/a/b/c/d/e/f/g/h/i/j/k/element(*, oak:Unstructured)";
+        String xpath = "/jcr:root//element(*, oak:Unstructured)";
         q = qm.createQuery("explain " + xpath, "xpath");
         result = q.execute();
         it = result.getRows();
@@ -72,25 +78,23 @@ public class QueryPlanTest extends AbstractRepositoryTest {
         // System.out.println("plan: " + plan);
         // should use the node type index
         assertEquals("[oak:Unstructured] as [a] " + 
-                "/* Filter(query=explain select [jcr:path], [jcr:score], * " + 
+                "/* nodeType Filter(query=explain select [jcr:path], [jcr:score], * " + 
                 "from [oak:Unstructured] as a " + 
-                "where ischildnode(a, '/a/b/c/d/e/f/g/h/i/j/k') " + 
-                "/* xpath: /jcr:root/a/b/c/d/e/f/g/h/i/j/k/element(*, oak:Unstructured) */" + 
-                ", path=/a/b/c/d/e/f/g/h/i/j/k/*) where " + 
-                "ischildnode([a], [/a/b/c/d/e/f/g/h/i/j/k]) */", 
+                "where isdescendantnode(a, '/') " + 
+                "/* xpath: /jcr:root//element(*, oak:Unstructured) */" + 
+                ", path=//*) where isdescendantnode([a], [/]) */", 
                 plan);
 
-        String xpath2 = "/jcr:root/a/b/c/d/e/f/g/h/i/j/k/element(*, oak:Unstructured)[@jcr:uuid]";
+        String xpath2 = "/jcr:root//element(*, oak:Unstructured)[@jcr:uuid]";
         q = qm.createQuery("explain " + xpath2 + "", "xpath");
         result = q.execute();
         it = result.getRows();
         assertTrue(it.hasNext());
         plan = it.nextRow().getValue("plan").getString();
-        // System.out.println("plan: " + plan);
         // should use the index on "jcr:uuid"
-        assertEquals("[oak:Unstructured] as [a] " + 
-                "/* property jcr:uuid where ([a].[jcr:uuid] is not null) " + 
-                "and (ischildnode([a], [/a/b/c/d/e/f/g/h/i/j/k])) */", 
+        assertEquals("[oak:Unstructured] as [a] " +
+                "/* property uuid IS NOT NULL where ([a].[jcr:uuid] is not null) " +
+                "and (isdescendantnode([a], [/])) */",
                 plan);
     }     
     
@@ -124,7 +128,7 @@ public class QueryPlanTest extends AbstractRepositoryTest {
         String plan = it.nextRow().getValue("plan").getString();
         // System.out.println("plan: " + plan);
         // should not use the index on "jcr:uuid"
-        assertEquals("[nt:base] as [a] /* property notNull " +
+        assertEquals("[nt:base] as [a] /* property notNull IS NOT NULL " +
                 "where ([a].[notNull] is not null) " +
                 "and ([a].[equals] = 1) " +
                 "and (isdescendantnode([a], [/])) */",
@@ -165,7 +169,7 @@ public class QueryPlanTest extends AbstractRepositoryTest {
         String plan = it.nextRow().getValue("plan").getString();
         // System.out.println("plan: " + plan);
         // should not use the index on "jcr:uuid"
-        assertEquals("[nt:base] as [a] /* property tenPercent " +
+        assertEquals("[nt:base] as [a] /* property tenPercent IS NOT NULL " +
                 "where ([a].[tenPercent] is not null) " +
                 "and ([a].[fiftyPercent] is not null) " +
                 "and ([a].[hundredPercent] is not null) " +
@@ -200,7 +204,7 @@ public class QueryPlanTest extends AbstractRepositoryTest {
         String plan = it.nextRow().getValue("plan").getString();
         // System.out.println("plan: " + plan);
         // should not use the index on "jcr:uuid"
-        assertEquals("[nt:base] as [a] /* property jcr:uuid " + 
+        assertEquals("[nt:base] as [a] /* property uuid IS NOT NULL " +
                 "where ([a].[jcr:uuid] is not null) and " + 
                 "(isdescendantnode([a], [/testroot/n/n/n/n/n/n/n])) */", 
                 plan);
@@ -210,6 +214,8 @@ public class QueryPlanTest extends AbstractRepositoryTest {
     public void nodeType() throws Exception {
         Session session = getAdminSession();
         QueryManager qm = session.getWorkspace().getQueryManager();
+        Node nodetype = session.getRootNode().getNode("oak:index").getNode("nodetype");
+        nodetype.setProperty("entryCount", 100000);
         Node testRootNode = session.getRootNode().addNode("testroot");
         Node n1 = testRootNode.addNode("node1");
         Node n2 = n1.addNode("node2");
@@ -217,7 +223,8 @@ public class QueryPlanTest extends AbstractRepositoryTest {
         session.save();
        
         String sql2 = "select [jcr:path] as [path] from [nt:base] " + 
-                "where [node2/node3/jcr:primaryType] is not null";
+                "where [node2/node3/jcr:primaryType] is not null " + 
+                "and isdescendantnode('/testroot')";
         
         Query q;
         QueryResult result;
@@ -229,8 +236,10 @@ public class QueryPlanTest extends AbstractRepositoryTest {
         assertTrue(it.hasNext());
         String plan = it.nextRow().getValue("plan").getString();
         // should not use the index on "jcr:primaryType"
-        assertEquals("[nt:base] as [nt:base] /* traverse \"*\" " + 
-                "where [nt:base].[node2/node3/jcr:primaryType] is not null */", 
+        assertEquals("[nt:base] as [nt:base] /* traverse \"/testroot//*\" " + 
+                "where ([nt:base].[node2/node3/jcr:primaryType] is not null) " + 
+                "and (isdescendantnode([nt:base], [/testroot])) " +
+                "*/", 
                 plan);
         
         // verify the result
@@ -287,7 +296,7 @@ public class QueryPlanTest extends AbstractRepositoryTest {
         it = result.getRows();
         assertTrue(it.hasNext());
         plan = it.nextRow().getValue("plan").getString();
-        assertEquals("[nt:base] as [a] /* property jcr:uuid " + 
+        assertEquals("[nt:base] as [a] /* property uuid IS NOT NULL " +
                 "where ([a].[jcr:uuid] is not null) " + 
                 "and (ischildnode([a], [/testroot])) */", plan);
         
@@ -384,6 +393,7 @@ public class QueryPlanTest extends AbstractRepositoryTest {
         Node n = s.getRootNode().getNode("oak:index").
                 addNode(propertyName, "oak:QueryIndexDefinition");
         n.setProperty("type", "property");
+        n.setProperty("entryCount", "-1");
         n.setProperty("propertyNames", new String[]{propertyName}, PropertyType.NAME);
         s.save();
     }

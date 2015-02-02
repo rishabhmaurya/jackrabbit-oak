@@ -22,11 +22,13 @@ import static java.util.Arrays.asList;
 
 import java.io.File;
 import java.io.PrintStream;
+import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import com.google.common.base.Charsets;
 import com.google.common.base.Splitter;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
@@ -47,7 +49,7 @@ import org.apache.jackrabbit.oak.fixture.RepositoryFixture;
  */
 public class ScalabilityRunner {
 
-    private static final int MB = 1024 * 1024;
+    private static final long MB = 1024 * 1024L;
 
     public static void main(String[] args) throws Exception {
         OptionParser parser = new OptionParser();
@@ -77,9 +79,6 @@ public class ScalabilityRunner {
         OptionSpec<File> csvFile =
                 parser.accepts("csvFile", "File to write a CSV version of the benchmark data.")
                         .withOptionalArg().ofType(File.class);
-        OptionSpec<File> dumpFile =
-                parser.accepts("dumpFile", "File to write threa dumps.")
-                        .withOptionalArg().ofType(File.class);
         OptionSpec help = parser.acceptsAll(asList("h", "?", "help"), "show help").forHelp();
         OptionSpec<String> nonOption = parser.nonOptions();
 
@@ -108,26 +107,39 @@ public class ScalabilityRunner {
                         host.value(options), port.value(options),
                         dbName.value(options), dropDBAfterTest.value(options),
                         cacheSize * MB),
-                OakRepositoryFixture.getMongoMK(
-                        host.value(options), port.value(options),
-                        dbName.value(options), dropDBAfterTest.value(options),
-                        cacheSize * MB),
                 OakRepositoryFixture.getTar(
                         base.value(options), 256, cacheSize, mmap.value(options)),
                 OakRepositoryFixture.getTarWithBlobStore(
                         base.value(options), 256, cacheSize, mmap.value(options))
         };
-        ScalabilitySuite[] allSuites = new ScalabilitySuite[] {
-                new ScalabilityBlobSearchSuite(withStorage.value(options))
-                    .addBenchmarks(new FullTextSearcher(), 
-                                    new NodeTypeSearcher(),
-                                    new FormatSearcher(),
-                                    new LastModifiedSearcher(Date.LAST_2_HRS),
-                                    new LastModifiedSearcher(Date.LAST_24_HRS),
-                                    new LastModifiedSearcher(Date.LAST_7_DAYS),
-                                    new LastModifiedSearcher(Date.LAST_MONTH),
-                                    new LastModifiedSearcher(Date.LAST_YEAR))
-        };
+        ScalabilitySuite[] allSuites =
+                new ScalabilitySuite[] {
+                        new ScalabilityBlobSearchSuite(withStorage.value(options))
+                                .addBenchmarks(new FullTextSearcher(),
+                                        new NodeTypeSearcher(),
+                                        new FormatSearcher(),
+                                        new LastModifiedSearcher(Date.LAST_2_HRS),
+                                        new LastModifiedSearcher(Date.LAST_24_HRS),
+                                        new LastModifiedSearcher(Date.LAST_7_DAYS),
+                                        new LastModifiedSearcher(Date.LAST_MONTH),
+                                        new LastModifiedSearcher(Date.LAST_YEAR),
+                                        new OrderByDate()),
+                        new ScalabilityNodeSuite(withStorage.value(options))
+                                .addBenchmarks(new OrderBySearcher(),
+                                        new SplitOrderBySearcher(),
+                                        new OrderByOffsetPageSearcher(),
+                                        new SplitOrderByOffsetPageSearcher(),
+                                        new OrderByKeysetPageSearcher(),
+                                        new SplitOrderByKeysetPageSearcher(),
+                                        new MultiFilterOrderBySearcher(),
+                                        new MultiFilterSplitOrderBySearcher(),
+                                        new MultiFilterOrderByOffsetPageSearcher(),
+                                        new MultiFilterSplitOrderByOffsetPageSearcher(),
+                                        new MultiFilterOrderByKeysetPageSearcher(),
+                                        new MultiFilterSplitOrderByKeysetPageSearcher()),
+                        new ScalabilityNodeRelationshipSuite(withStorage.value(options))
+                                .addBenchmarks(new AggregateNodeSearcher())
+                };
 
         Set<String> argset = Sets.newHashSet(nonOption.values(options));
         List<RepositoryFixture> fixtures = Lists.newArrayList();
@@ -148,7 +160,12 @@ public class ScalabilityRunner {
             }
             argset.remove(arg);
         }
-        
+
+        if (argmap.isEmpty()) {
+            System.err.println("Warning: no scalability suites specified, " +
+                "supported  are: " + Arrays.asList(allSuites));
+        }
+
         List<ScalabilitySuite> suites = Lists.newArrayList();
         for (ScalabilitySuite suite : allSuites) {
             if (argmap.containsKey(suite.toString())) {
@@ -171,7 +188,9 @@ public class ScalabilityRunner {
         if (argmap.isEmpty()) {
             PrintStream out = null;
             if (options.has(csvFile)) {
-                out = new PrintStream(FileUtils.openOutputStream(csvFile.value(options), true));
+                out =
+                    new PrintStream(FileUtils.openOutputStream(csvFile.value(options), true), false,
+                                            Charsets.UTF_8.name());
             }
             for (ScalabilitySuite suite : suites) {
                 if (suite instanceof CSVResultGenerator) {

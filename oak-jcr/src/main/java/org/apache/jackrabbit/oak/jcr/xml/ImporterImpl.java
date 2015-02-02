@@ -16,6 +16,8 @@
  */
 package org.apache.jackrabbit.oak.jcr.xml;
 
+import static org.apache.jackrabbit.oak.plugins.nodetype.NodeTypeConstants.NODE_TYPES_PATH;
+
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -23,8 +25,10 @@ import java.util.List;
 import java.util.Set;
 import java.util.Stack;
 import java.util.UUID;
+
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import javax.jcr.ImportUUIDBehavior;
 import javax.jcr.ItemExistsException;
 import javax.jcr.PathNotFoundException;
@@ -38,6 +42,9 @@ import javax.jcr.nodetype.PropertyDefinition;
 import javax.jcr.version.VersionException;
 import javax.jcr.version.VersionManager;
 
+import com.google.common.base.Function;
+import com.google.common.base.Predicates;
+import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import org.apache.jackrabbit.JcrConstants;
 import org.apache.jackrabbit.oak.api.PropertyState;
@@ -64,8 +71,6 @@ import org.apache.jackrabbit.oak.spi.xml.ReferenceChangeTracker;
 import org.apache.jackrabbit.oak.util.TreeUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import static org.apache.jackrabbit.oak.plugins.nodetype.NodeTypeConstants.NODE_TYPES_PATH;
 
 public class ImporterImpl implements Importer {
     private static final Logger log = LoggerFactory.getLogger(ImporterImpl.class);
@@ -131,12 +136,12 @@ public class ImporterImpl implements Importer {
                         Root root,
                         int uuidBehavior,
                         boolean isWorkspaceImport) throws RepositoryException {
-        if (!PathUtils.isAbsolute(absPath)) {
-            throw new RepositoryException("Not an absolute path: " + absPath);
-        }
-        String oakPath = sessionContext.getOakPathKeepIndex(absPath);
+        String oakPath = sessionContext.getOakPath(absPath);
         if (oakPath == null) {
             throw new RepositoryException("Invalid name or path: " + absPath);
+        }
+        if (!PathUtils.isAbsolute(oakPath)) {
+            throw new RepositoryException("Not an absolute path: " + absPath);
         }
 
         SessionDelegate sd = sessionContext.getSessionDelegate();
@@ -147,7 +152,7 @@ public class ImporterImpl implements Importer {
         this.uuidBehavior = uuidBehavior;
         userID = sd.getAuthInfo().getUserID();
 
-        importTargetTree = root.getTree(absPath);
+        importTargetTree = root.getTree(oakPath);
         if (!importTargetTree.exists()) {
             throw new PathNotFoundException(absPath);
         }
@@ -294,20 +299,48 @@ public class ImporterImpl implements Importer {
                 log.debug("Protected property " + pi.getName());
 
                 // notify the ProtectedPropertyImporter.
-                for (ProtectedItemImporter ppi : pItemImporters) {
-                    if (ppi instanceof ProtectedPropertyImporter
-                            && ((ProtectedPropertyImporter) ppi).handlePropInfo(tree, pi, def)) {
+                for (ProtectedPropertyImporter ppi : getPropertyImporters()) {
+                    if (ppi.handlePropInfo(tree, pi, def)) {
                         log.debug("Protected property -> delegated to ProtectedPropertyImporter");
                         break;
-                    } /* else: p-i-Importer isn't able to deal with this property.
-                                     try next pp-importer */
-
+                    } /* else: p-i-Importer isn't able to deal with this property. try next pp-importer */
                 }
             } else if (!ignoreRegular) {
                 // regular property -> create the property
                 createProperty(tree, pi, def);
             }
         }
+        for (ProtectedPropertyImporter ppi : getPropertyImporters()) {
+            ppi.propertiesCompleted(tree);
+        }
+    }
+
+    private Iterable<ProtectedPropertyImporter> getPropertyImporters() {
+        return Iterables.filter(Iterables.transform(pItemImporters, new Function<ProtectedItemImporter, ProtectedPropertyImporter>() {
+            @Nullable
+            @Override
+            public ProtectedPropertyImporter apply(@Nullable ProtectedItemImporter importer) {
+                if (importer instanceof ProtectedPropertyImporter) {
+                    return (ProtectedPropertyImporter) importer;
+                } else {
+                    return null;
+                }
+            }
+        }), Predicates.notNull());
+    }
+
+    private Iterable<ProtectedNodeImporter> getNodeImporters() {
+        return Iterables.filter(Iterables.transform(pItemImporters, new Function<ProtectedItemImporter, ProtectedNodeImporter>() {
+            @Nullable
+            @Override
+            public ProtectedNodeImporter apply(@Nullable ProtectedItemImporter importer) {
+                if (importer instanceof ProtectedNodeImporter) {
+                    return (ProtectedNodeImporter) importer;
+                } else {
+                    return null;
+                }
+            }
+        }), Predicates.notNull());
     }
 
     //-----------------------------------------------------------< Importer >---
@@ -354,10 +387,10 @@ public class ImporterImpl implements Importer {
                 // if there is one, notify the ProtectedNodeImporter about the
                 // start of a item tree that is protected by this parent. If it
                 // potentially is able to deal with it, notify it about the child node.
-                for (ProtectedItemImporter pni : pItemImporters) {
-                    if (pni instanceof ProtectedNodeImporter && ((ProtectedNodeImporter) pni).start(parent)) {
+                for (ProtectedNodeImporter pni : getNodeImporters()) {
+                    if (pni.start(parent)) {
                         log.debug("Protected node -> delegated to ProtectedNodeImporter");
-                        pnImporter = (ProtectedNodeImporter) pni;
+                        pnImporter = pni;
                         pnImporter.startChildInfo(nodeInfo, propInfos);
                         break;
                     } /* else: p-i-Importer isn't able to deal with the protected tree.
@@ -421,7 +454,15 @@ public class ImporterImpl implements Importer {
             // create node
             if (id == null) {
                 // no potential uuid conflict, always add new node
-                tree = createTree(parent, nodeInfo, id);
+                tree = createTree(parent, nodeInfo, null);
+            } else if (uuidBehavior == ImportUUIDBehavior.IMPORT_UUID_CREATE_NEW) {
+                // always create a new UUID even if no
+                // conflicting node exists. see OAK-1244
+                tree = createTree(parent, nodeInfo, UUID.randomUUID().toString());
+                // remember uuid mapping
+                if (isNodeType(tree, JcrConstants.MIX_REFERENCEABLE)) {
+                    refTracker.put(nodeInfo.getUUID(), TreeUtil.getString(tree, JcrConstants.JCR_UUID));
+                }
             } else {
 
                 //1. First check from base state that tree corresponding to
@@ -442,12 +483,7 @@ public class ImporterImpl implements Importer {
                     conflicting = currentStateIdManager.getTree(id);
                 }
 
-                // resolve conflict if there is one or force
-                // conflict resolution when behavior is IMPORT_UUID_CREATE_NEW.
-                // the latter will always create a new UUID even if no
-                // conflicting node exists. see OAK-1244
-                if ((conflicting != null && conflicting.exists())
-                        || uuidBehavior == ImportUUIDBehavior.IMPORT_UUID_CREATE_NEW) {
+                if (conflicting != null && conflicting.exists()) {
                     // resolve uuid conflict
                     tree = resolveUUIDConflict(parent, conflicting, id, nodeInfo);
                     if (tree == null) {

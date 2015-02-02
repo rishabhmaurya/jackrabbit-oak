@@ -61,7 +61,7 @@ public class Compactor {
 
     private final SegmentWriter writer;
 
-    private CompactionMap map = new CompactionMap(100000);
+    private final CompactionMap map;
 
     /**
      * Map from {@link #getBlobKey(Blob) blob keys} to matching compacted
@@ -70,8 +70,20 @@ public class Compactor {
      */
     private final Map<String, List<RecordId>> binaries = newHashMap();
 
+    /**
+     * If the compactor should copy large binaries as streams or just copy the
+     * refs
+     */
+    private final boolean cloneBinaries;
+
     public Compactor(SegmentWriter writer) {
+        this(writer, false);
+    }
+
+    public Compactor(SegmentWriter writer, boolean cloneBinaries) {
         this.writer = writer;
+        this.map = new CompactionMap(100000, writer.getTracker());
+        this.cloneBinaries = cloneBinaries;
     }
 
     protected SegmentNodeBuilder process(NodeState before, NodeState after) {
@@ -82,7 +94,9 @@ public class Compactor {
     }
 
     public SegmentNodeState compact(NodeState before, NodeState after) {
-        return process(before, after).getNodeState();
+        SegmentNodeState compacted = process(before, after).getNodeState();
+        writer.flush();
+        return compacted;
     }
 
     public CompactionMap getCompactionMap() {
@@ -100,7 +114,6 @@ public class Compactor {
         public boolean propertyAdded(PropertyState after) {
             return super.propertyAdded(compact(after));
         }
-
 
         @Override
         public boolean propertyChanged(
@@ -120,14 +133,16 @@ public class Compactor {
                 }
             }
 
-            NodeBuilder child = builder.setChildNode(name);
-            boolean success = EmptyNodeState.compareAgainstEmptyState(
-                    after, new CompactDiff(child));
+            NodeBuilder child = EmptyNodeState.EMPTY_NODE.builder();
+            boolean success = EmptyNodeState.compareAgainstEmptyState(after,
+                    new CompactDiff(child));
 
-            if (success && id != null && child.getChildNodeCount(2) > 1) {
-                RecordId compactedId =
-                        writer.writeNode(child.getNodeState()).getRecordId();
-                map.put(id, compactedId);
+            if (success) {
+                SegmentNodeState state = writer.writeNode(child.getNodeState());
+                builder.setChildNode(name, state);
+                if (id != null) {
+                    map.put(id, state.getRecordId());
+                }
             }
 
             return success;
@@ -147,13 +162,15 @@ public class Compactor {
             }
 
             NodeBuilder child = builder.getChildNode(name);
-            boolean success = after.compareAgainstBaseState(
-                    before, new CompactDiff(child));
+            boolean success = after.compareAgainstBaseState(before,
+                    new CompactDiff(child));
 
-            if (success && id != null && child.getChildNodeCount(2) > 1) {
-                RecordId compactedId =
-                        writer.writeNode(child.getNodeState()).getRecordId();
-                map.put(id, compactedId);
+            if (success) {
+                RecordId compactedId = writer.writeNode(child.getNodeState())
+                        .getRecordId();
+                if (id != null) {
+                    map.put(id, compactedId);
+                }
             }
 
             return success;
@@ -190,11 +207,6 @@ public class Compactor {
             SegmentBlob sb = (SegmentBlob) blob;
 
             try {
-                // if the blob is inlined or external, just clone it
-                if (sb.isExternal() || sb.length() < Segment.MEDIUM_LIMIT) {
-                    return sb.clone(writer);
-                }
-
                 // else check if we've already cloned this specific record
                 RecordId id = sb.getRecordId();
                 RecordId compactedId = map.get(id);
@@ -202,19 +214,27 @@ public class Compactor {
                     return new SegmentBlob(compactedId);
                 }
 
+                // if the blob is inlined or external, just clone it
+                if (sb.isExternal() || sb.length() < Segment.MEDIUM_LIMIT) {
+                    SegmentBlob clone = sb.clone(writer, cloneBinaries);
+                    map.put(id, clone.getRecordId());
+                    return clone;
+                }
+
                 // alternatively look if the exact same binary has been cloned
                 String key = getBlobKey(blob);
                 List<RecordId> ids = binaries.get(key);
                 if (ids != null) {
                     for (RecordId duplicateId : ids) {
-                        if (new SegmentBlob(duplicateId).equals(blob)) {
+                        if (new SegmentBlob(duplicateId).equals(sb)) {
+                            map.put(id, duplicateId);
                             return new SegmentBlob(duplicateId);
                         }
                     }
                 }
 
                 // if not, clone the blob and keep track of the result
-                sb = sb.clone(writer);
+                sb = sb.clone(writer, cloneBinaries);
                 map.put(id, sb.getRecordId());
                 if (ids == null) {
                     ids = newArrayList();
@@ -224,7 +244,7 @@ public class Compactor {
 
                 return sb;
             } catch (IOException e) {
-                log.warn("Failed to compcat a blob", e);
+                log.warn("Failed to compact a blob", e);
                 // fall through
             }
         }
@@ -233,7 +253,7 @@ public class Compactor {
         return blob;
     }
 
-    private String getBlobKey(Blob blob) throws IOException {
+    private static String getBlobKey(Blob blob) throws IOException {
         InputStream stream = blob.getNewStream();
         try {
             byte[] buffer = new byte[SegmentWriter.BLOCK_SIZE];

@@ -32,6 +32,7 @@ import org.apache.jackrabbit.oak.query.SQL2Parser;
 public class LiteralImpl extends StaticOperandImpl {
 
     private final PropertyValue value;
+    private int hashCode;
 
     public LiteralImpl(PropertyValue value) {
         this.value = value;
@@ -51,7 +52,7 @@ public class LiteralImpl extends StaticOperandImpl {
     }
 
     @Override
-    PropertyValue currentValue() {
+    public PropertyValue currentValue() {
         // TODO namespace remapping?
         return value;
     }
@@ -89,7 +90,10 @@ public class LiteralImpl extends StaticOperandImpl {
 
     @Override
     public int hashCode() {
-        return value.hashCode();
+        if (hashCode == 0) {
+            hashCode = value.hashCode();
+        }
+        return hashCode;
     }
 
 }

@@ -23,6 +23,7 @@ import static com.google.common.collect.Maps.newHashMap;
 import static com.google.common.collect.Maps.newLinkedHashMap;
 import static com.google.common.collect.Maps.newTreeMap;
 import static com.google.common.collect.Sets.newHashSetWithExpectedSize;
+import static java.util.Collections.emptyMap;
 import static java.util.Collections.singletonList;
 import static org.apache.jackrabbit.oak.plugins.segment.Segment.REF_COUNT_OFFSET;
 import static org.apache.jackrabbit.oak.plugins.segment.SegmentId.isDataSegmentId;
@@ -45,6 +46,7 @@ import java.util.regex.Pattern;
 import java.util.zip.CRC32;
 
 import org.apache.commons.io.FileUtils;
+import org.apache.jackrabbit.oak.plugins.segment.CompactionMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -67,7 +69,7 @@ class TarReader {
     /** The tar file block size. */
     private static final int BLOCK_SIZE = TarWriter.BLOCK_SIZE;
 
-    private static final int getEntrySize(int size) {
+    static int getEntrySize(int size) {
         return BLOCK_SIZE + size + TarWriter.getPaddingSize(size);
     }
 
@@ -146,7 +148,7 @@ class TarReader {
         if (reader != null) {
             return reader;
         } else {
-            throw new IOException("Failed to open recoved tar file " + file);
+            throw new IOException("Failed to open recovered tar file " + file);
         }
     }
 
@@ -485,6 +487,34 @@ class TarReader {
         return file.length();
     }
 
+    /**
+     * Returns the number of segments in this tar file.
+     *
+     * @return number of segments
+     */
+    int count() {
+        return index.capacity() / 24;
+    }
+
+    /**
+     * Iterates over all entries in this tar file and calls
+     * {@link TarEntryVisitor#visit(long, long, File, int, int)} on them.
+     *
+     * @param visitor entry visitor
+     */
+    void accept(TarEntryVisitor visitor) {
+        int position = index.position();
+        while (position < index.limit()) {
+            visitor.visit(
+                    index.getLong(position),
+                    index.getLong(position + 8),
+                    file,
+                    index.getInt(position + 16),
+                    index.getInt(position + 20));
+            position += 24;
+        }
+    }
+
     Set<UUID> getUUIDs() {
         Set<UUID> uuids = newHashSetWithExpectedSize(index.remaining() / 24);
         int position = index.position();
@@ -501,6 +531,17 @@ class TarReader {
         return findEntry(msb, lsb) != -1;
     }
 
+    /**
+     * If the given segment is in this file, get the byte buffer that allows
+     * reading it.
+     * <p>
+     * Whether or not this will read from the file depends on whether memory
+     * mapped files are used or not.
+     * 
+     * @param msb the most significant bits of the segment id
+     * @param lsb the least significant bits of the segment id
+     * @return the byte buffer, or null if not in this file
+     */
     ByteBuffer readEntry(long msb, long lsb) throws IOException {
         int position = findEntry(msb, lsb);
         if (position != -1) {
@@ -512,6 +553,14 @@ class TarReader {
         }
     }
 
+    /**
+     * Find the position of the given segment in the tar file.
+     * It uses the tar index if available.
+     * 
+     * @param msb the most significant bits of the segment id
+     * @param lsb the least significant bits of the segment id
+     * @return the position in the file, or -1 if not found
+     */
     private int findEntry(long msb, long lsb) {
         // The segment identifiers are randomly generated with uniform
         // distribution, so we can use interpolation search to find the
@@ -556,12 +605,27 @@ class TarReader {
         return -1;
     }
 
-    synchronized TarReader cleanup(Set<UUID> referencedIds) throws IOException {
+    /**
+     * Garbage collects segments in this file. First it collects the set of
+     * segments that are referenced / reachable, then (if more than 25% is
+     * garbage) creates a new generation of the file.
+     * <p>
+     * The old generation files are not removed (they can't easily be removed,
+     * for memory mapped files).
+     * 
+     * @param referencedIds the referenced segment ids (input and output).
+     * @return this (if the file is kept as is), or the new generation file, or
+     *         null if the file is fully garbage
+     */
+    synchronized TarReader cleanup(Set<UUID> referencedIds, CompactionMap cm) throws IOException {
+        if (referencedIds.isEmpty()) {
+            return null;
+        }
+
         Map<UUID, List<UUID>> graph = null;
         if (this.graph != null) {
             graph = parseGraph();
         }
-
         TarEntry[] sorted = new TarEntry[index.remaining() / 24];
         int position = index.position();
         for (int i = 0; position < index.limit(); i++) {
@@ -583,16 +647,27 @@ class TarReader {
                 // this segment is not referenced anywhere
                 sorted[i] = null;
             } else {
-                size += getEntrySize(entry.size());
-                count += 1;
-
                 if (isDataSegmentId(entry.lsb())) {
+                    size += getEntrySize(entry.size());
+                    count += 1;
+
                     // this is a referenced data segment, so follow the graph
                     if (graph != null) {
                         List<UUID> refids = graph.get(
                                 new UUID(entry.msb(), entry.lsb()));
                         if (refids != null) {
-                            referencedIds.addAll(refids);
+                            for (UUID r : refids) {
+                                if (isDataSegmentId(r.getLeastSignificantBits())) {
+                                    referencedIds.add(r);
+                                } else {
+                                    if (cm != null && cm.wasCompacted(id)) {
+                                        // skip bulk compacted segment
+                                        // references
+                                    } else {
+                                        referencedIds.add(r);
+                                    }
+                                }
+                            }
                         }
                     } else {
                         // a pre-compiled graph is not available, so read the
@@ -604,10 +679,26 @@ class TarReader {
                         int refcount = segment.get(pos + REF_COUNT_OFFSET) & 0xff;
                         int refend = pos + 16 * (refcount + 1);
                         for (int refpos = pos + 16; refpos < refend; refpos += 16) {
-                            referencedIds.add(new UUID(
-                                    segment.getLong(refpos),
-                                    segment.getLong(refpos + 8)));
+                            UUID r = new UUID(segment.getLong(refpos),
+                                    segment.getLong(refpos + 8));
+                            if (isDataSegmentId(r.getLeastSignificantBits())) {
+                                referencedIds.add(r);
+                            } else {
+                                if (cm != null && cm.wasCompacted(id)) {
+                                    // skip bulk compacted segment references
+                                } else {
+                                    referencedIds.add(r);
+                                }
+                            }
                         }
+                    }
+                } else {
+                    // bulk segments compaction check
+                    if (cm != null && cm.wasCompacted(id)) {
+                        sorted[i] = null;
+                    } else {
+                        size += getEntrySize(entry.size());
+                        count += 1;
                     }
                 }
             }
@@ -666,6 +757,14 @@ class TarReader {
 
     //-----------------------------------------------------------< private >--
 
+    Map<UUID, List<UUID>> getGraph() throws IOException {
+        if (graph == null) {
+            return emptyMap();
+        } else {
+            return parseGraph();
+        }
+    }
+
     private Map<UUID, List<UUID>> parseGraph() throws IOException {
         int count = graph.getInt(graph.limit() - 12);
 
@@ -716,7 +815,7 @@ class TarReader {
         return number;
     }
 
-    File getFile(){
+    File getFile() {
         return file;
     }
 

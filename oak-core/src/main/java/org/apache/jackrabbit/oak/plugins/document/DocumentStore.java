@@ -28,14 +28,17 @@ import javax.annotation.Nonnull;
  * document. That is, an implementation does not have to guarantee atomicity of
  * the entire effect of a method call. A method that fails with an exception may
  * have modified just some documents and then abort. However, an implementation
- * must not modify a document partially. Either the complete update operation
- * is applied to a document or no modification is done at all.
+ * must not modify a document partially. Either the complete update operation is
+ * applied to a document or no modification is done at all.
  * <p>
  * Even though none of the methods declare an exception, they will still throw
  * an implementation specific runtime exception when the operations fails (e.g.
  * an I/O error occurs).
  * <p>
- * For keys, the maximum length is 512 bytes in the UTF-8 representation.
+ * The key is the id of a document. Keys are opaque strings. All characters are
+ * allowed. Leading and trailing whitespace is allowed. For keys, the maximum
+ * length is 512 bytes in the UTF-8 representation (in the latest Unicode
+ * version).
  */
 public interface DocumentStore {
 
@@ -75,9 +78,9 @@ public interface DocumentStore {
 
     /**
      * Get a list of documents where the key is greater than a start value and
-     * less than an end value, sorted by the key.
+     * less than an end value.
      * <p>
-     * The returned documents are immutable.
+     * The returned documents are sorted by key and are immutable.
      *
      * @param <T> the document type
      * @param collection the collection
@@ -94,7 +97,14 @@ public interface DocumentStore {
 
     /**
      * Get a list of documents where the key is greater than a start value and
-     * less than an end value. The returned documents are immutable.
+     * less than an end value <em>and</em> the given "indexed property" is greater
+     * or equals the specified value.
+     * <p>
+     * The indexed property can either be a {@link Long} value, in which case numeric
+     * comparison applies, or a {@link Boolean} value, in which case "false" is mapped
+     * to "0" and "true" is mapped to "1".
+     * <p>
+     * The returned documents are sorted by key and are immutable.
      *
      * @param <T> the document type
      * @param collection the collection

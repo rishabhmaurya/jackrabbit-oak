@@ -23,6 +23,8 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.sql.Timestamp;
 import java.util.Comparator;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.SortedMap;
@@ -32,17 +34,24 @@ import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
+import com.google.common.base.Predicate;
+import com.google.common.collect.AbstractIterator;
 import com.mongodb.BasicDBObject;
 
 import org.apache.commons.codec.binary.Hex;
 import org.apache.jackrabbit.oak.commons.PathUtils;
+import org.apache.jackrabbit.oak.plugins.document.Collection;
+import org.apache.jackrabbit.oak.plugins.document.DocumentStore;
+import org.apache.jackrabbit.oak.plugins.document.NodeDocument;
 import org.apache.jackrabbit.oak.plugins.document.Revision;
 import org.apache.jackrabbit.oak.plugins.document.RevisionContext;
+import org.apache.jackrabbit.oak.plugins.document.StableRevisionComparator;
 import org.bson.types.ObjectId;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.isDeletedEntry;
 
 /**
  * Utility methods.
@@ -76,6 +85,16 @@ public class Utils {
     private static final int NODE_NAME_LIMIT = Integer.getInteger("oak.nodeNameLimit", 150);
 
     private static final Charset UTF_8 = Charset.forName("UTF-8");
+
+    /**
+     * A predicate for property and _deleted names.
+     */
+    public static final Predicate<String> PROPERTY_OR_DELETED = new Predicate<String>() {
+        @Override
+        public boolean apply(@Nullable String input) {
+            return Utils.isPropertyName(input) || isDeletedEntry(input);
+        }
+    };
 
     /**
      * Make sure the name string does not contain unnecessary baggage (shared
@@ -460,6 +479,96 @@ public class Utils {
                                           @Nonnull Revision x,
                                           @Nonnull Revision previous) {
         return context.getRevisionComparator().compare(x, previous) > 0;
+    }
+
+    /**
+     * Returns the revision with the newer timestamp or {@code null} if both
+     * revisions are {@code null}. The implementation will return the first
+     * revision if both have the same timestamp.
+     *
+     * @param a the first revision (or {@code null}).
+     * @param b the second revision (or {@code null}).
+     * @return the revision with the newer timestamp.
+     */
+    @CheckForNull
+    public static Revision max(@Nullable Revision a, @Nullable Revision b) {
+        if (a == null) {
+            return b;
+        } else if (b == null) {
+            return a;
+        }
+        return StableRevisionComparator.INSTANCE.compare(a, b) >= 0 ? a : b;
+    }
+
+    /**
+     * Returns an {@link Iterable} over all {@link NodeDocument}s in the given
+     * store. The returned {@linkplain Iterable} does not guarantee a consistent
+     * view on the store. it may return documents that have been added to the
+     * store after this method had been called.
+     *
+     * @param store
+     *            a {@link DocumentStore}.
+     * @return an {@link Iterable} over all documents in the store.
+     */
+    public static Iterable<NodeDocument> getAllDocuments(final DocumentStore store) {
+        return internalGetSelectedDocuments(store, null, 0);
+    }
+
+    /**
+     * Returns an {@link Iterable} over all {@link NodeDocument}s in the given
+     * store matching a condition on an <em>indexed property</em>. The returned
+     * {@linkplain Iterable} does not guarantee a consistent view on the store.
+     * it may return documents that have been added to the store after this
+     * method had been called.
+     *
+     * @param store
+     *            a {@link DocumentStore}.
+     * @return an {@link Iterable} over all documents in the store matching the
+     *         condition
+     */
+    public static Iterable<NodeDocument> getSelectedDocuments(final DocumentStore store, String indexedProperty, long startValue) {
+        return internalGetSelectedDocuments(store, indexedProperty, startValue);
+    }
+
+    private static Iterable<NodeDocument> internalGetSelectedDocuments(final DocumentStore store, final String indexedProperty,
+            final long startValue) {
+        return new Iterable<NodeDocument>() {
+            @Override
+            public Iterator<NodeDocument> iterator() {
+                return new AbstractIterator<NodeDocument>() {
+
+                    private static final int BATCH_SIZE = 100;
+                    private String startId = NodeDocument.MIN_ID_VALUE;
+
+                    private Iterator<NodeDocument> batch = nextBatch();
+
+                    @Override
+                    protected NodeDocument computeNext() {
+                        // read next batch if necessary
+                        if (!batch.hasNext()) {
+                            batch = nextBatch();
+                        }
+
+                        NodeDocument doc;
+                        if (batch.hasNext()) {
+                            doc = batch.next();
+                            // remember current id
+                            startId = doc.getId();
+                        } else {
+                            doc = endOfData();
+                        }
+                        return doc;
+                    }
+
+                    private Iterator<NodeDocument> nextBatch() {
+                        List<NodeDocument> result = indexedProperty == null ? store.query(Collection.NODES, startId,
+                                NodeDocument.MAX_ID_VALUE, BATCH_SIZE) : store.query(Collection.NODES, startId,
+                                NodeDocument.MAX_ID_VALUE, indexedProperty, startValue, BATCH_SIZE);
+                        return result.iterator();
+                    }
+                };
+            }
+        };
     }
 
 }

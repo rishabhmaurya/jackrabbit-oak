@@ -41,6 +41,9 @@ public class SQL2ParserTest {
     public void testIgnoreSqlComment() throws ParseException {
         p.parse("select * from [nt:unstructured] /* sql comment */");
         p.parse("select [jcr:path], [jcr:score], * from [nt:base] as a /* xpath: //* */");
+        p.parse("/* begin query */ select [jcr:path] /* this is the path */, " + 
+                "[jcr:score] /* the score */, * /* everything*/ " + 
+                "from [nt:base] /* all node types */ as a /* an identifier */");
     }
 
     @Test(expected = ParseException.class)
@@ -52,6 +55,14 @@ public class SQL2ParserTest {
     public void testTransformAndParse() throws ParseException {
         p.parse(new XPathToSQL2Converter()
                 .convert("/jcr:root/test/*/nt:resource[@jcr:encoding]"));
+        p.parse(new XPathToSQL2Converter()
+                .convert("/jcr:root/test/*/*/nt:resource[@jcr:encoding]"));        
+        
+        String xpath = "/jcr:root/etc/commerce/products//*[@cq:commerceType = 'product' " +
+                "and ((@size = 'M' or */@size= 'M' or */*/@size = 'M' " +
+                "or */*/*/@size = 'M' or */*/*/*/@size = 'M' or */*/*/*/*/@size = 'M'))]";
+        p.parse(new XPathToSQL2Converter()
+                .convert(xpath));        
     }
 
     // see OAK-OAK-830: XPathToSQL2Converter fails to wrap or clauses
@@ -59,7 +70,7 @@ public class SQL2ParserTest {
     public void testUnwrappedOr() throws ParseException {
         String q = new XPathToSQL2Converter()
                 .convert("/jcr:root/home//test/* [@type='t1' or @type='t2' or @type='t3']");
-        String token = "and (b.[type] = 't1' or b.[type] = 't2' or b.[type] = 't3')";
+        String token = "and b.[type] in('t1', 't2', 't3')";
         assertTrue(q.contains(token));
     }
     

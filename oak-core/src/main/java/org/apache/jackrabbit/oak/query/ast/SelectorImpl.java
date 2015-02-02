@@ -58,6 +58,8 @@ import org.apache.jackrabbit.oak.spi.query.QueryIndex;
 import org.apache.jackrabbit.oak.spi.query.QueryIndex.AdvancedQueryIndex;
 import org.apache.jackrabbit.oak.spi.query.QueryIndex.IndexPlan;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
@@ -66,6 +68,7 @@ import com.google.common.collect.Iterables;
  * A selector within a query.
  */
 public class SelectorImpl extends SourceImpl {
+    private static final Logger LOG = LoggerFactory.getLogger(SelectorImpl.class);
     
     // TODO possibly support using multiple indexes (using index intersection / index merge)
     private SelectorExecutionPlan plan;
@@ -438,6 +441,10 @@ public class SelectorImpl extends SourceImpl {
         }
         for (ConstraintImpl constraint : selectorConstraints) {
             if (!constraint.evaluate()) {
+                if (constraint.evaluateStop()) {
+                    // stop processing from now on
+                    cursor = null;
+                }
                 return false;
             }
         }
@@ -547,6 +554,10 @@ public class SelectorImpl extends SourceImpl {
         boolean asterisk = oakPropertyName.indexOf('*') >= 0;
         if (asterisk) {
             Tree t = currentTree();
+            if (t != null) {
+                LOG.trace("currentOakProperty() - '*' case. looking for '{}' in '{}'",
+                    oakPropertyName, t.getPath());
+            }
             ArrayList<PropertyValue> list = new ArrayList<PropertyValue>();
             readOakProperties(list, t, oakPropertyName, propertyType);
             if (list.size() == 0) {
@@ -570,11 +581,18 @@ public class SelectorImpl extends SourceImpl {
                 }
                 return PropertyValues.newString(strings);
             }
+            Type<?> baseType = type.isArray() ? type.getBaseType() : type;
             @SuppressWarnings("unchecked")
-            PropertyBuilder<Object> builder = (PropertyBuilder<Object>) PropertyBuilder.array(type);
+            PropertyBuilder<Object> builder = (PropertyBuilder<Object>) PropertyBuilder.array(baseType);
             builder.setName("");
             for (PropertyValue v : list) {
-                builder.addValue(v.getValue(type));
+                if (type.isArray()) {
+                    for (Object value : (Iterable<?>) v.getValue(type)) {
+                        builder.addValue(value);
+                    }
+                } else {
+                    builder.addValue(v.getValue(type));
+                }
             }
             PropertyState s = builder.getPropertyState();
             return PropertyValues.create(s);
@@ -616,6 +634,8 @@ public class SelectorImpl extends SourceImpl {
             result = currentRow.getValue(QueryImpl.JCR_SCORE);
         } else if (oakPropertyName.equals(QueryImpl.REP_EXCERPT)) {
             result = currentRow.getValue(QueryImpl.REP_EXCERPT);
+        } else if (oakPropertyName.equals(QueryImpl.REP_SPELLCHECK)) {
+            result = currentRow.getValue(QueryImpl.REP_SPELLCHECK);
         } else {
             result = PropertyValues.create(t.getProperty(oakPropertyName));
         }
@@ -630,10 +650,13 @@ public class SelectorImpl extends SourceImpl {
     
     private void readOakProperties(ArrayList<PropertyValue> target, Tree t, String oakPropertyName, Integer propertyType) {
         boolean skipCurrentNode = false;
-        while (true) {
+
+        while (!skipCurrentNode) {
             if (t == null || !t.exists()) {
                 return;
             }
+            LOG.trace("readOakProperties() - reading '{}' for '{}'", t.getPath(),
+                oakPropertyName);
             int slash = oakPropertyName.indexOf('/');
             if (slash < 0) {
                 break;
@@ -659,6 +682,7 @@ public class SelectorImpl extends SourceImpl {
         if (!"*".equals(oakPropertyName)) {
             PropertyValue value = currentOakProperty(t, oakPropertyName, propertyType);
             if (value != null) {
+                LOG.trace("readOakProperties() - adding: '{}' from '{}'", value, t.getPath());
                 target.add(value);
             }
             return;

@@ -30,6 +30,7 @@ import javax.jcr.PropertyType;
 import javax.jcr.RepositoryException;
 
 import org.apache.jackrabbit.oak.api.PropertyValue;
+import org.apache.jackrabbit.oak.api.QueryEngine;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.apache.jackrabbit.oak.namepath.NamePathMapper;
@@ -63,7 +64,8 @@ public class SQL2Parser {
     private static final Logger LOG = LoggerFactory.getLogger(SQL2Parser.class);
 
     // Character types, used during the tokenizer phase
-    private static final int CHAR_END = -1, CHAR_VALUE = 2, CHAR_QUOTED = 3;
+    private static final int CHAR_END = -1, CHAR_IGNORE = 0;
+    private static final int CHAR_VALUE = 2, CHAR_QUOTED = 3;
     private static final int CHAR_NAME = 4, CHAR_SPECIAL_1 = 5, CHAR_SPECIAL_2 = 6;
     private static final int CHAR_STRING = 7, CHAR_DECIMAL = 8, CHAR_BRACKETED = 9;
 
@@ -104,6 +106,8 @@ public class SQL2Parser {
     private NamePathMapper namePathMapper;
     
     private final QueryEngineSettings settings;
+    
+    private boolean literalUsageLogged;
 
     /**
      * Create a new parser. A parser can be re-used, but it is not thread safe.
@@ -153,7 +157,6 @@ public class SQL2Parser {
             read("BY");
             orderings = parseOrder();
         }
-        parseComment();
         if (!currentToken.isEmpty()) {
             throw getSyntaxError("<end>");
         }
@@ -167,6 +170,7 @@ public class SQL2Parser {
             e2.initCause(e);
             throw e2;
         }
+        q.setInternal(isInternal(query));
         return q;
     }
     
@@ -553,6 +557,15 @@ public class SQL2Parser {
             String language = readString().getValue(Type.STRING);
             read(",");
             c = factory.nativeFunction(selectorName, language, parseStaticOperand());
+        } else if ("SPELLCHECK".equalsIgnoreCase(functionName)) {
+            String selectorName;
+            if (currentTokenType == IDENTIFIER) {
+                selectorName = readName();
+                read(",");
+            } else {
+                selectorName = getOnlySelectorName();
+            }
+            c = factory.spellcheck(selectorName, parseStaticOperand());            
         } else {
             return null;
         }
@@ -825,32 +838,43 @@ public class SQL2Parser {
                         }
                         read(")");
                     }
+                    readOptionalAlias(column);
                 } else {                    
                     column.propertyName = readName();
-                    if (readIf(".")) {
+                    if (column.propertyName.equals("rep:spellcheck")) {
+                        if (readIf("(")) {
+                            read(")");
+                            column.propertyName = ":spellcheck";
+                        }
+                        readOptionalAlias(column);                        
+                    } else if (readIf(".")) {
                         column.selectorName = column.propertyName;
                         if (readIf("*")) {
                             column.propertyName = null;
                         } else {
                             column.propertyName = readName();
-                            if (readIf("AS")) {
-                                column.columnName = readName();
-                            } else {
+                            if (!readOptionalAlias(column)) {
                                 column.columnName =
                                         column.selectorName
                                         + "." + column.propertyName;
                             }
                         }
                     } else {
-                        if (readIf("AS")) {
-                            column.columnName = readName();
-                        }
+                        readOptionalAlias(column);
                     }
                 }
                 list.add(column);
             } while (readIf(","));
         }
         return list;
+    }
+    
+    private boolean readOptionalAlias(ColumnOrWildcard column) throws ParseException {
+        if (readIf("AS")) {
+            column.columnName = readName();
+            return true;
+        }
+        return false;
     }
 
     private ColumnImpl[] resolveColumns(ArrayList<ColumnOrWildcard> list) throws ParseException {
@@ -918,18 +942,6 @@ public class SQL2Parser {
         }
     }
 
-    private void parseComment() throws ParseException {
-        if (readIf("/") && readIf("*")) {
-            //skip to the end directly
-            parseIndex = characterTypes.length - 3;
-            read();
-            boolean endComment = readIf("*") && readIf("/");
-            if (!endComment) {
-                throw getSyntaxError("end of comment");
-            }
-        }
-    }
-
     private boolean readIf(String token) throws ParseException {
         if (isToken(token)) {
             read();
@@ -985,7 +997,6 @@ public class SQL2Parser {
             char c = command[i];
             int type = 0;
             switch (c) {
-            case '/':
             case '-':
             case '(':
             case ')':
@@ -1010,6 +1021,21 @@ public class SQL2Parser {
                 break;
             case '.':
                 type = CHAR_DECIMAL;
+                break;
+            case '/':
+                if (command[i + 1] != '*') {
+                    type = CHAR_SPECIAL_1;
+                    break;
+                }
+                types[i] = type = CHAR_IGNORE;                
+                startLoop = i;
+                i += 2;
+                checkRunOver(i, len, startLoop);
+                while (command[i] != '*' || command[i + 1] != '/') {
+                    i++;
+                    checkRunOver(i, len, startLoop);
+                }
+                i++;          
                 break;
             case '[':
                 types[i] = type = CHAR_BRACKETED;
@@ -1236,8 +1262,9 @@ public class SQL2Parser {
     }
 
     private void checkLiterals(boolean text) throws ParseException {
-        if (LOG.isDebugEnabled()) {
-            LOG.debug("Literal used in query: " + statement);
+        if (LOG.isTraceEnabled() && !literalUsageLogged) {
+            literalUsageLogged = true;
+            LOG.trace("Literal used");
         }
         if (text && !allowTextLiterals || !text && !allowNumberLiterals) {
             throw getSyntaxError("bind variable (literals of this type not allowed)");
@@ -1346,6 +1373,16 @@ public class SQL2Parser {
 
     public void setIncludeSelectorNameInWildcardColumns(boolean value) {
         this.includeSelectorNameInWildcardColumns = value;
+    }
+
+    /**
+     * Whether the given statement is an internal query.
+     *  
+     * @param statement the statement
+     * @return true for an internal query
+     */
+    public static boolean isInternal(String statement) {
+        return statement.indexOf(QueryEngine.INTERNAL_SQL2_QUERY) >= 0;
     }
 
 }

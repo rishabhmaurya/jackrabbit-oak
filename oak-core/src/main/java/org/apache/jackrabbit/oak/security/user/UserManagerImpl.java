@@ -16,16 +16,20 @@
  */
 package org.apache.jackrabbit.oak.security.user;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import java.io.UnsupportedEncodingException;
 import java.security.NoSuchAlgorithmException;
 import java.security.Principal;
 import java.util.Iterator;
+
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import javax.jcr.RepositoryException;
 import javax.jcr.UnsupportedRepositoryOperationException;
 
+import com.google.common.base.Strings;
 import org.apache.jackrabbit.api.security.principal.PrincipalManager;
 import org.apache.jackrabbit.api.security.user.Authorizable;
 import org.apache.jackrabbit.api.security.user.AuthorizableExistsException;
@@ -55,8 +59,6 @@ import org.apache.jackrabbit.oak.spi.security.user.util.UserUtil;
 import org.apache.jackrabbit.oak.util.NodeUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import static com.google.common.base.Preconditions.checkNotNull;
 
 /**
  * UserManagerImpl...
@@ -116,7 +118,7 @@ public class UserManagerImpl implements UserManager {
 
     @Override
     public Authorizable getAuthorizableByPath(String path) throws RepositoryException {
-        String oakPath = namePathMapper.getOakPathKeepIndex(path);
+        String oakPath = namePathMapper.getOakPath(path);
         if (oakPath == null) {
             throw new RepositoryException("Invalid path " + path);
         }
@@ -139,9 +141,9 @@ public class UserManagerImpl implements UserManager {
     }
 
     @Override
-    public User createUser(final String userId, String password) throws RepositoryException {
-        Principal principal = new PrincipalImpl(userId);
-        return createUser(userId, password, principal, null);
+    public User createUser(final String userID, String password) throws RepositoryException {
+        Principal principal = new PrincipalImpl(userID);
+        return createUser(userID, password, principal, null);
     }
 
     @Override
@@ -151,7 +153,7 @@ public class UserManagerImpl implements UserManager {
         checkValidPrincipal(principal, false);
 
         if (intermediatePath != null) {
-            intermediatePath = namePathMapper.getOakPathKeepIndex(intermediatePath);
+            intermediatePath = namePathMapper.getOakPath(intermediatePath);
         }
         Tree userTree = userProvider.createUser(userID, intermediatePath);
         setPrincipal(userTree, principal);
@@ -163,6 +165,21 @@ public class UserManagerImpl implements UserManager {
         onCreate(user, password);
 
         log.debug("User created: " + userID);
+        return user;
+    }
+
+    @Override
+    public User createSystemUser(String userID, String intermediatePath) throws AuthorizableExistsException, RepositoryException {
+        checkValidID(userID);
+        Principal principal = new PrincipalImpl(userID);
+        checkValidPrincipal(principal, false);
+
+        Tree userTree = userProvider.createSystemUser(userID, intermediatePath);
+        setPrincipal(userTree, principal);
+
+        User user = new SystemUserImpl(userID, userTree, this);
+
+        log.debug("System user created: " + userID);
         return user;
     }
 
@@ -188,7 +205,7 @@ public class UserManagerImpl implements UserManager {
         checkValidPrincipal(principal, true);
 
         if (intermediatePath != null) {
-            intermediatePath = namePathMapper.getOakPathKeepIndex(intermediatePath);
+            intermediatePath = namePathMapper.getOakPath(intermediatePath);
         }
         Tree groupTree = userProvider.createGroup(groupID, intermediatePath);
         setPrincipal(groupTree, principal);
@@ -327,7 +344,11 @@ public class UserManagerImpl implements UserManager {
             return null;
         }
         if (UserUtil.isType(tree, AuthorizableType.USER)) {
-            return new UserImpl(UserUtil.getAuthorizableId(tree), tree, this);
+            if (UserUtil.isSystemUser(tree)) {
+                return new SystemUserImpl(UserUtil.getAuthorizableId(tree), tree, this);
+            } else {
+                return new UserImpl(UserUtil.getAuthorizableId(tree), tree, this);
+            }
         } else if (UserUtil.isType(tree, AuthorizableType.GROUP)) {
             return new GroupImpl(UserUtil.getAuthorizableId(tree), tree, this);
         } else {
@@ -336,7 +357,7 @@ public class UserManagerImpl implements UserManager {
     }
 
     private void checkValidID(String id) throws RepositoryException {
-        if (id == null || id.length() == 0) {
+        if (id == null || id.isEmpty()) {
             throw new IllegalArgumentException("Invalid ID " + id);
         } else if (getAuthorizable(id) != null) {
             throw new AuthorizableExistsException("Authorizable with ID " + id + " already exists");
@@ -344,7 +365,7 @@ public class UserManagerImpl implements UserManager {
     }
 
     void checkValidPrincipal(Principal principal, boolean isGroup) throws RepositoryException {
-        if (principal == null || principal.getName() == null || "".equals(principal.getName())) {
+        if (principal == null || Strings.isNullOrEmpty(principal.getName())) {
             throw new IllegalArgumentException("Principal may not be null and must have a valid name.");
         }
         if (!isGroup && EveryonePrincipal.NAME.equals(principal.getName())) {

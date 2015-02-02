@@ -21,13 +21,13 @@ import java.util.List;
 
 import javax.annotation.Nonnull;
 
+import org.apache.jackrabbit.oak.plugins.index.aggregate.AggregateIndex;
 import org.apache.jackrabbit.oak.plugins.index.aggregate.NodeAggregator;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.Observer;
 import org.apache.jackrabbit.oak.spi.query.QueryIndex;
 import org.apache.jackrabbit.oak.spi.query.QueryIndexProvider;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
-import org.apache.lucene.analysis.Analyzer;
 
 import com.google.common.collect.ImmutableList;
 
@@ -38,11 +38,17 @@ import com.google.common.collect.ImmutableList;
  */
 public class LuceneIndexProvider implements QueryIndexProvider, Observer, Closeable {
 
-    protected final IndexTracker tracker = new IndexTracker();
-
-    protected volatile Analyzer analyzer = LuceneIndexConstants.ANALYZER;
+    protected final IndexTracker tracker;
 
     protected volatile NodeAggregator aggregator = null;
+
+    public LuceneIndexProvider() {
+        this(new IndexTracker());
+    }
+
+    public LuceneIndexProvider(IndexTracker tracker) {
+        this.tracker = tracker;
+    }
 
     public void close() {
         tracker.close();
@@ -59,18 +65,15 @@ public class LuceneIndexProvider implements QueryIndexProvider, Observer, Closea
 
     @Override @Nonnull
     public List<QueryIndex> getQueryIndexes(NodeState nodeState) {
-        return ImmutableList.<QueryIndex> of(newLuceneIndex());
+        return ImmutableList.<QueryIndex> of(new AggregateIndex(newLuceneIndex()), newLucenePropertyIndex());
     }
 
     protected LuceneIndex newLuceneIndex() {
-        return new LuceneIndex(tracker, analyzer, aggregator);
+        return new LuceneIndex(tracker, aggregator);
     }
 
-    /**
-     * sets the default analyzer that will be used at query time
-     */
-    public void setAnalyzer(Analyzer analyzer) {
-        this.analyzer = analyzer;
+    protected LucenePropertyIndex newLucenePropertyIndex() {
+        return new LucenePropertyIndex(tracker);
     }
 
     /**
@@ -81,11 +84,6 @@ public class LuceneIndexProvider implements QueryIndexProvider, Observer, Closea
     }
 
     // ----- helper builder method
-
-    public LuceneIndexProvider with(Analyzer analyzer) {
-        this.setAnalyzer(analyzer);
-        return this;
-    }
 
     public LuceneIndexProvider with(NodeAggregator analyzer) {
         this.setAggregator(analyzer);

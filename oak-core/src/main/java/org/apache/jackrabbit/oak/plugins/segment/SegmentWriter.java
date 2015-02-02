@@ -37,6 +37,7 @@ import static org.apache.jackrabbit.oak.api.Type.NAMES;
 import static org.apache.jackrabbit.oak.plugins.segment.MapRecord.BUCKETS_PER_LEVEL;
 import static org.apache.jackrabbit.oak.plugins.segment.Segment.MAX_SEGMENT_SIZE;
 import static org.apache.jackrabbit.oak.plugins.segment.Segment.RECORD_ID_BYTES;
+import static org.apache.jackrabbit.oak.plugins.segment.Segment.SEGMENT_REFERENCE_LIMIT;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -46,6 +47,7 @@ import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -72,6 +74,13 @@ import com.google.common.io.Closeables;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Converts nodes, properties, and values to records, which are written to a
+ * byte array, in order to create segments.
+ * <p>
+ * The same writer is used to create multiple segments (data is automatically
+ * split: new segments are automatically created if and when needed).
+ */
 public class SegmentWriter {
 
     /** Logger instance */
@@ -80,7 +89,7 @@ public class SegmentWriter {
 
     static final int BLOCK_SIZE = 1 << 12; // 4kB
 
-    private static byte[] createNewBuffer() {
+    static byte[] createNewBuffer() {
         byte[] buffer = new byte[Segment.MAX_SEGMENT_SIZE];
         buffer[0] = '0';
         buffer[1] = 'a';
@@ -163,6 +172,11 @@ public class SegmentWriter {
         }
     }
 
+    /**
+     * Adds a segment header to the buffer and writes a segment to the segment
+     * store. This is done automatically (called from prepare) when there is not
+     * enough space for a record. It can also be called explicitly.
+     */
     public synchronized void flush() {
         if (length > 0) {
             int refcount = segment.getRefCount();
@@ -178,6 +192,8 @@ public class SegmentWriter {
             length = align(
                     refcount * 16 + rootcount * 3 + blobrefcount * 2 + length,
                     16);
+
+            checkState(length <= buffer.length);
 
             int pos = refcount * 16;
             if (pos + length <= buffer.length) {
@@ -237,6 +253,23 @@ public class SegmentWriter {
         return prepare(type, size, Collections.<RecordId>emptyList());
     }
 
+    /**
+     * Before writing a record (which are written backwards, from the end of the
+     * file to the beginning), this method is called, to ensure there is enough
+     * space. A new segment is also created if there is not enough space in the
+     * segment lookup table or elsewhere.
+     * <p>
+     * This method does not actually write into the segment, just allocates the
+     * space (flushing the segment if needed and starting a new one), and sets
+     * the write position (records are written from the end to the beginning,
+     * but within a record from left to right).
+     * 
+     * @param type the record type (only used for root records)
+     * @param size the size of the record, excluding the size used for the
+     *            record ids
+     * @param ids the record ids
+     * @return a new record id
+     */
     private RecordId prepare(
             RecordType type, int size, Collection<RecordId> ids) {
         checkArgument(size >= 0);
@@ -262,14 +295,23 @@ public class SegmentWriter {
             refcount -= idcount;
 
             Set<SegmentId> segmentIds = newIdentityHashSet();
+            
+            // The set of old record ids in this segment
+            // that were previously root record ids, but will no longer be,
+            // because the record to be written references them.
+            // This needs to be a set, because the list of ids can
+            // potentially reference the same record multiple times
+            Set<RecordId> notRoots = new HashSet<RecordId>();
             for (RecordId recordId : ids) {
                 SegmentId segmentId = recordId.getSegmentId();
                 if (segmentId != segment.getSegmentId()) {
                     segmentIds.add(segmentId);
                 } else if (roots.containsKey(recordId)) {
-                    rootcount--;
+                    notRoots.add(recordId);
                 }
             }
+            rootcount -= notRoots.size();
+
             if (!segmentIds.isEmpty()) {
                 for (int refid = 1; refid < refcount; refid++) {
                     segmentIds.remove(segment.getRefId(refid));
@@ -299,6 +341,10 @@ public class SegmentWriter {
 
     private synchronized int getSegmentRef(SegmentId segmentId) {
         int refcount = segment.getRefCount();
+        if (refcount > SEGMENT_REFERENCE_LIMIT) {
+          throw new SegmentOverflowException(
+                  "Segment cannot have more than 255 references " + segment.getSegmentId());
+        }
         for (int index = 0; index < refcount; index++) {
             if (segmentId == segment.getRefId(index)) {
                 return index;
@@ -312,6 +358,12 @@ public class SegmentWriter {
         return refcount;
     }
 
+    /**
+     * Write a record id, and marks the record id as referenced (removes it from
+     * the unreferenced set).
+     * 
+     * @param recordId the record id
+     */
     private synchronized void writeRecordId(RecordId recordId) {
         checkNotNull(recordId);
         roots.remove(recordId);
@@ -605,7 +657,7 @@ public class SegmentWriter {
         return thisLevel.iterator().next();
     }
 
-    public MapRecord writeMap(MapRecord base, Map<String, RecordId> changes) {
+    MapRecord writeMap(MapRecord base, Map<String, RecordId> changes) {
         if (base != null && base.isDiff()) {
             Segment segment = base.getSegment();
             RecordId key = segment.readRecordId(base.getOffset(8));
@@ -744,7 +796,7 @@ public class SegmentWriter {
         return new SegmentBlob(id);
     }
 
-    public synchronized void dropCache(){
+    public synchronized void dropCache() {
         records.clear();
     }
 
@@ -905,6 +957,8 @@ public class SegmentWriter {
         RecordId[] propertyNames = new RecordId[properties.length];
         byte[] propertyTypes = new byte[properties.length];
         for (int i = 0; i < properties.length; i++) {
+            // Note: if the property names are stored in more than 255 separate
+            // segments, this will not work.
             propertyNames[i] = writeString(properties[i].getName());
             Type<?> type = properties[i].getType();
             if (type.isArray()) {
@@ -940,6 +994,14 @@ public class SegmentWriter {
         return id;
     }
 
+    /**
+     * If the given node was compacted, return the compacted node, otherwise
+     * return the passed node. This is to avoid pointing to old nodes, if they
+     * have been compacted.
+     * 
+     * @param state the node
+     * @return the compacted node (if it was compacted)
+     */
     private SegmentNodeState uncompact(SegmentNodeState state) {
         RecordId id = tracker.getCompactionMap().get(state.getRecordId());
         if (id != null) {
@@ -1031,8 +1093,8 @@ public class SegmentWriter {
             if (property instanceof SegmentPropertyState
                     && store.containsSegment(((SegmentPropertyState) property).getRecordId().getSegmentId())) {
                 ids.add(((SegmentPropertyState) property).getRecordId());
-            } else if (!(before instanceof SegmentNodeState)
-                    || store.containsSegment(((SegmentNodeState) before).getRecordId().getSegmentId())) {
+            } else if (before == null
+                    || !store.containsSegment(before.getRecordId().getSegmentId())) {
                 ids.add(writeProperty(property));
             } else {
                 // reuse previously stored property, if possible
@@ -1061,6 +1123,10 @@ public class SegmentWriter {
             }
             return new SegmentNodeState(recordId);
         }
+    }
+
+    public SegmentTracker getTracker() {
+        return tracker;
     }
 
 }

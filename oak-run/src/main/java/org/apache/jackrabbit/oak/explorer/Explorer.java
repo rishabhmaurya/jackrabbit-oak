@@ -41,7 +41,10 @@ import javax.swing.JTextArea;
 import javax.swing.UIManager;
 import javax.swing.UIManager.LookAndFeelInfo;
 
-import org.apache.jackrabbit.oak.plugins.segment.file.FileStore;
+import org.apache.jackrabbit.oak.plugins.segment.file.FileStore.ReadOnlyStore;
+import org.apache.jackrabbit.oak.plugins.segment.file.JournalReader;
+
+import com.google.common.collect.Lists;
 
 /**
  * NodeStore explorer
@@ -51,23 +54,27 @@ import org.apache.jackrabbit.oak.plugins.segment.file.FileStore;
  */
 public class Explorer {
 
+    private static String skip = "skip-size-check";
+
     public static void main(String[] args) throws IOException {
         new Explorer(args);
     }
 
     public Explorer(String[] args) throws IOException {
         if (args.length == 0) {
-            System.err.println("usage: explore <path>");
+            System.err.println("usage: explore <path> [skip-size-check]");
             System.exit(1);
         }
 
         final String path = args[0];
-        final FileStore store = new FileStore(new File(path), 256);
+        final ReadOnlyStore store = new ReadOnlyStore(new File(path));
+        final boolean skipSizeCheck = args.length == 2
+                && skip.equalsIgnoreCase(args[1]);
 
         javax.swing.SwingUtilities.invokeLater(new Runnable() {
             public void run() {
                 initLF();
-                createAndShowGUI(path, store);
+                createAndShowGUI(path, store, skipSizeCheck);
             }
         });
     }
@@ -86,8 +93,8 @@ public class Explorer {
         }
     }
 
-    private void createAndShowGUI(final String path, final FileStore store) {
-        final JFrame frame = new JFrame("Explore " + path);
+    private void createAndShowGUI(final String path, final ReadOnlyStore store, boolean skipSizeCheck) {
+        final JFrame frame = new JFrame("Explore " + path + " @head");
         frame.addWindowListener(new java.awt.event.WindowAdapter() {
             @Override
             public void windowClosing(java.awt.event.WindowEvent windowEvent) {
@@ -103,7 +110,7 @@ public class Explorer {
         log.setLineWrap(true);
         log.setEditable(false);
 
-        final NodeStoreTree treePanel = new NodeStoreTree(store, log);
+        final NodeStoreTree treePanel = new NodeStoreTree(store, log, skipSizeCheck);
 
         GridBagConstraints c = new GridBagConstraints();
         c.fill = GridBagConstraints.BOTH;
@@ -119,22 +126,50 @@ public class Explorer {
         JMenuBar menuBar = new JMenuBar();
         menuBar.setMargin(new Insets(2, 2, 2, 2));
 
-        JMenuItem menuCompaction = new JMenuItem("Tar Compaction");
-        menuCompaction.setMnemonic(KeyEvent.VK_C);
+        JMenuItem menuCompaction = new JMenuItem("Time Machine");
+        menuCompaction.setMnemonic(KeyEvent.VK_T);
         menuCompaction.addActionListener(new ActionListener() {
             @Override
             public void actionPerformed(ActionEvent ev) {
-                int run = JOptionPane.showConfirmDialog(frame,
-                        "Run compaction on the tar files", "Tar Compaction",
-                        JOptionPane.WARNING_MESSAGE, JOptionPane.YES_NO_OPTION);
-                if (run == JOptionPane.YES_OPTION) {
-                    treePanel.compact();
+                List<String> revs = new ArrayList<String>();
+
+                File journal = new File(path, "journal.log");
+                if (!journal.exists()) {
+                    return;
+                }
+
+                JournalReader journalReader = null;
+                try {
+                    journalReader = new JournalReader(journal);
+                    try {
+                        revs = Lists.newArrayList(journalReader.iterator());
+                    } finally {
+                        journalReader.close();
+                    }
+                } catch (IOException e) {
+                    e.printStackTrace();
+                    return;
+                } finally {
+                    try {
+                        if (journalReader != null) {
+                            journalReader.close();
+                        }
+                    } catch (IOException e) {
+                    }
+                }
+
+                String s = (String) JOptionPane.showInputDialog(frame,
+                        "Revert to a specified revision", "Time Machine",
+                        JOptionPane.PLAIN_MESSAGE, null, revs.toArray(),
+                        revs.get(0));
+                if (s != null && treePanel.revert(s)) {
+                    frame.setTitle("Explore " + path + " @" + s);
                 }
             }
         });
 
-        JMenuItem menuRefs = new JMenuItem("Tar File Refs");
-        menuRefs.setMnemonic(KeyEvent.VK_R);
+        JMenuItem menuRefs = new JMenuItem("Tar File Info");
+        menuRefs.setMnemonic(KeyEvent.VK_I);
         menuRefs.addActionListener(new ActionListener() {
             @Override
             public void actionPerformed(ActionEvent ev) {
@@ -146,11 +181,26 @@ public class Explorer {
                 }
 
                 String s = (String) JOptionPane.showInputDialog(frame,
-                        "Choose a tar file", "Tar File References",
+                        "Choose a tar file", "Tar File Info",
                         JOptionPane.PLAIN_MESSAGE, null, tarFiles.toArray(),
                         tarFiles.get(0));
                 if (s != null) {
-                    treePanel.printDependenciesToFile(s);
+                    treePanel.printTarInfo(s);
+                    return;
+                }
+            }
+        });
+
+        JMenuItem menuSCR = new JMenuItem("Segment Content Refs");
+        menuSCR.setMnemonic(KeyEvent.VK_R);
+        menuSCR.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent ev) {
+                String s = (String) JOptionPane.showInputDialog(frame,
+                        "Segment Content Ref\nUsage: <segmentId>",
+                        "Segment Content Ref", JOptionPane.PLAIN_MESSAGE);
+                if (s != null) {
+                    treePanel.printDependenciesToSegment(s);
                     return;
                 }
             }
@@ -174,6 +224,8 @@ public class Explorer {
         menuBar.add(menuCompaction);
         menuBar.add(new JSeparator(JSeparator.VERTICAL));
         menuBar.add(menuRefs);
+        menuBar.add(new JSeparator(JSeparator.VERTICAL));
+        menuBar.add(menuSCR);
         menuBar.add(new JSeparator(JSeparator.VERTICAL));
         menuBar.add(menuDiff);
         menuBar.add(new JSeparator(JSeparator.VERTICAL));

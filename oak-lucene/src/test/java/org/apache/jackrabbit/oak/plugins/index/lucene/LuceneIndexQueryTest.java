@@ -28,11 +28,13 @@ import org.apache.jackrabbit.oak.query.AbstractQueryTest;
 import org.apache.jackrabbit.oak.spi.commit.Observer;
 import org.apache.jackrabbit.oak.spi.query.QueryIndexProvider;
 import org.apache.jackrabbit.oak.spi.security.OpenSecurityProvider;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import static java.util.Arrays.asList;
 import static junit.framework.Assert.assertEquals;
 import static org.apache.jackrabbit.oak.api.Type.STRINGS;
+import static org.apache.jackrabbit.oak.plugins.index.lucene.TestUtil.useV2;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -45,7 +47,15 @@ public class LuceneIndexQueryTest extends AbstractQueryTest {
     @Override
     protected void createTestIndexNode() throws Exception {
         Tree index = root.getTree("/");
-        createTestIndexNode(index, LuceneIndexConstants.TYPE_LUCENE);
+        Tree indexDefn = createTestIndexNode(index, LuceneIndexConstants.TYPE_LUCENE);
+        useV2(indexDefn);
+        indexDefn.setProperty(LuceneIndexConstants.TEST_MODE, true);
+        indexDefn.setProperty(LuceneIndexConstants.EVALUATE_PATH_RESTRICTION, true);
+
+        Tree props = TestUtil.newRulePropTree(indexDefn, "nt:base");
+        TestUtil.enablePropertyIndex(props, "c1/p", false);
+        TestUtil.enableForFullText(props, LuceneIndexConstants.REGEX_ALL_PROPS, true);
+
         root.commit();
     }
 
@@ -68,6 +78,11 @@ public class LuceneIndexQueryTest extends AbstractQueryTest {
     @Test
     public void sql2() throws Exception {
         test("sql2.txt");
+    }
+    
+    @Test
+    public void sql2FullText() throws Exception {
+        test("sql2-fulltext.txt");
     }
 
     @Test
@@ -151,6 +166,7 @@ public class LuceneIndexQueryTest extends AbstractQueryTest {
 
     }
 
+    @Ignore("OAK-2424")
     @Test
     public void containsDash() throws Exception {
         Tree test = root.getTree("/").addChild("test");
@@ -166,11 +182,18 @@ public class LuceneIndexQueryTest extends AbstractQueryTest {
 
     }
 
+    @Ignore("OAK-2424")
     @Test
     public void multiPhraseQuery() throws Exception {
         Tree test = root.getTree("/").addChild("test");
         test.addChild("a").setProperty("dc:format", "type:application/pdf");
+        test.addChild("b").setProperty("dc:format", "progress");
         root.commit();
+
+        assertQuery(
+                "/jcr:root//*[jcr:contains(@dc:format, 'pro*')]",
+                "xpath", ImmutableList.of("/test/b"));
+
 
         assertQuery(
                 "/jcr:root//*[jcr:contains(@dc:format, 'type:appli*')]",

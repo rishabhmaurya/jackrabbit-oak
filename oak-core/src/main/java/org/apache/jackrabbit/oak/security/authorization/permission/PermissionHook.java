@@ -21,8 +21,8 @@ import java.util.Map;
 import javax.annotation.Nonnull;
 
 import org.apache.jackrabbit.oak.api.CommitFailedException;
-import org.apache.jackrabbit.oak.core.ImmutableRoot;
 import org.apache.jackrabbit.oak.plugins.nodetype.TypePredicate;
+import org.apache.jackrabbit.oak.plugins.tree.RootFactory;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.PostValidationHook;
 import org.apache.jackrabbit.oak.spi.security.authorization.accesscontrol.AccessControlConstants;
@@ -92,7 +92,7 @@ public class PermissionHook implements PostValidationHook, AccessControlConstant
         NodeBuilder rootAfter = after.builder();
 
         permissionRoot = getPermissionRoot(rootAfter);
-        bitsProvider = new PrivilegeBitsProvider(new ImmutableRoot(after));
+        bitsProvider = new PrivilegeBitsProvider(RootFactory.createReadOnlyRoot(after));
 
         isACL = new TypePredicate(after, NT_REP_ACL);
         isACE = new TypePredicate(after, NT_REP_ACE);
@@ -102,6 +102,11 @@ public class PermissionHook implements PostValidationHook, AccessControlConstant
         after.compareAgainstBaseState(before, diff);
         apply();
         return rootAfter.getNodeState();
+    }
+
+    @Override
+    public String toString() {
+        return "PermissionHook";
     }
 
     private void apply() {

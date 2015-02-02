@@ -63,6 +63,10 @@ import org.apache.jackrabbit.oak.spi.xml.ProtectedItemImporter;
                 label = "Group Path",
                 description = "Path underneath which group nodes are being created.",
                 value = UserConstants.DEFAULT_GROUP_PATH),
+        @Property(name = UserConstants.PARAM_SYSTEM_RELATIVE_PATH,
+                label = "System User Relative Path",
+                description = "Path relative to the user root path underneath which system user nodes are being created. The default value is 'system'.",
+                value = UserConstants.DEFAULT_SYSTEM_RELATIVE_PATH),
         @Property(name = UserConstants.PARAM_DEFAULT_DEPTH,
                 label = "Default Depth",
                 description = "Number of levels that are used by default to store authorizable nodes",
@@ -98,12 +102,12 @@ import org.apache.jackrabbit.oak.spi.xml.ProtectedItemImporter;
                 intValue = UserConstants.DEFAULT_PASSWORD_MAX_AGE),
         @Property(name = UserConstants.PARAM_PASSWORD_INITIAL_CHANGE,
                 label = "Change Password On First Login",
-                description = "When enabled, forces users to change their password upon first login. Note that a maximum password age must be set to a value > 0 in order to make this option functional.",
+                description = "When enabled, forces users to change their password upon first login.",
                 boolValue = UserConstants.DEFAULT_PASSWORD_INITIAL_CHANGE)
 })
 public class UserConfigurationImpl extends ConfigurationBase implements UserConfiguration, SecurityConfiguration {
 
-    private final UserAuthenticationFactory defaultAuthFactory = new UserAuthenticationFactoryImpl();
+    private static final UserAuthenticationFactory DEFAULT_AUTH_FACTORY = new UserAuthenticationFactoryImpl();
 
     public UserConfigurationImpl() {
         super();
@@ -111,6 +115,10 @@ public class UserConfigurationImpl extends ConfigurationBase implements UserConf
 
     public UserConfigurationImpl(SecurityProvider securityProvider) {
         super(securityProvider, securityProvider.getParameters(NAME));
+    }
+
+    public static UserAuthenticationFactory getDefaultAuthenticationFactory() {
+        return DEFAULT_AUTH_FACTORY;
     }
 
     @Activate
@@ -132,7 +140,7 @@ public class UserConfigurationImpl extends ConfigurationBase implements UserConf
         if (!params.containsKey(UserConstants.PARAM_USER_AUTHENTICATION_FACTORY)) {
             return ConfigurationParameters.of(
                     params,
-                    ConfigurationParameters.of(UserConstants.PARAM_USER_AUTHENTICATION_FACTORY, defaultAuthFactory));
+                    ConfigurationParameters.of(UserConstants.PARAM_USER_AUTHENTICATION_FACTORY, DEFAULT_AUTH_FACTORY));
         } else {
             return params;
         }

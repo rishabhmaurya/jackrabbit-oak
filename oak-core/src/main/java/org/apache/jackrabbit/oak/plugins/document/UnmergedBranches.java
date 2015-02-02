@@ -16,12 +16,9 @@
  */
 package org.apache.jackrabbit.oak.plugins.document;
 
-import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Preconditions.checkNotNull;
-
+import java.lang.ref.ReferenceQueue;
 import java.util.Comparator;
 import java.util.List;
-import java.util.SortedMap;
 import java.util.SortedSet;
 import java.util.TreeSet;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -29,8 +26,16 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 
+import org.apache.jackrabbit.oak.plugins.document.Branch.BranchCommit;
+import org.apache.jackrabbit.oak.plugins.document.Branch.BranchReference;
 import org.apache.jackrabbit.oak.plugins.document.util.Utils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 /**
  * <code>UnmergedBranches</code> contains all un-merged branches of a DocumentMK
@@ -38,10 +43,20 @@ import org.apache.jackrabbit.oak.plugins.document.util.Utils;
  */
 class UnmergedBranches {
 
+    private final Logger log = LoggerFactory.getLogger(getClass());
+
     /**
-     * Map of branches with the head of the branch as key.
+     * List of active branches.
      */
     private final List<Branch> branches = new CopyOnWriteArrayList<Branch>();
+
+    /**
+     * Queue for {@link BranchReference} when the
+     * {@link DocumentNodeStoreBranch} associated with a {@link Branch} is only
+     * weakly reachable.
+     */
+    private final ReferenceQueue<Object> queue = 
+            new ReferenceQueue<Object>();
 
     /**
      * Set to <code>true</code> once initialized.
@@ -72,37 +87,41 @@ class UnmergedBranches {
         if (doc == null) {
             return;
         }
-        SortedMap<Revision, Revision> revisions = doc.getUncommittedRevisions(context);
-        while (!revisions.isEmpty()) {
-            SortedSet<Revision> commits = new TreeSet<Revision>(comparator);
-            Revision head = revisions.lastKey();
-            commits.add(head);
-            Revision base = revisions.remove(head).asTrunkRevision();
-            while (revisions.containsKey(base)) {
-                commits.add(base);
-                base = revisions.remove(base).asTrunkRevision();
-            }
-            branches.add(new Branch(commits, base));
+        int purgeCount = doc.purgeUncommittedRevisions(context);
+        if (purgeCount > 0) {
+            log.info("Purged [{}] uncommitted branch revision entries", purgeCount);
+        }
+        purgeCount = doc.purgeCollisionMarkers(context);
+        if (purgeCount > 0) {
+            log.info("Purged [{}] collision markers", purgeCount);
         }
     }
 
     /**
      * Create a branch with an initial commit revision.
      *
-     * @param base the base revision of the branch.
-     * @param initial the initial commit to the branch.
+     * @param base the base revision of the branch (must be a non-branch revision).
+     * @param initial the initial commit to the branch (must be a branch revision).
+     * @param guard an optional guard object controlling the life time of this
+     *              branch. When {@code guard} becomes weakly reachable, the
+     *              branch will at some point later be considered orphaned.
+     *              Orphaned branches can be retrieved with
+     *              {@link #pollOrphanedBranch()}.
      * @return the branch.
-     * @throws IllegalArgumentException if
+     * @throws IllegalArgumentException if {@code base} is a branch revision
+     *          or {@code initial} is not a branch revision.
      */
     @Nonnull
-    Branch create(@Nonnull Revision base, @Nonnull Revision initial) {
+    Branch create(@Nonnull Revision base,
+                  @Nonnull Revision initial,
+                  @Nullable Object guard) {
         checkArgument(!checkNotNull(base).isBranch(),
                 "base is not a trunk revision: %s", base);
         checkArgument(checkNotNull(initial).isBranch(),
                 "initial is not a branch revision: %s", initial);
         SortedSet<Revision> commits = new TreeSet<Revision>(comparator);
         commits.add(initial);
-        Branch b = new Branch(commits, base);
+        Branch b = new Branch(commits, base, queue, guard);
         branches.add(b);
         return b;
     }
@@ -125,10 +144,51 @@ class UnmergedBranches {
     }
 
     /**
+     * Returns the branch commit with the given revision or {@code null} if
+     * it doesn't exists.
+     *
+     * @param r a revision.
+     * @return the branch commit or {@code null} if it doesn't exist.
+     */
+    @CheckForNull
+    BranchCommit getBranchCommit(@Nonnull Revision r) {
+        for (Branch b : branches) {
+            BranchCommit c = b.getCommit(r);
+            if (c != null) {
+                return c;
+            }
+        }
+        return null;
+    }
+
+    /**
      * Removes the given branch.
      * @param b the branch to remove.
      */
     void remove(Branch b) {
         branches.remove(b);
+    }
+
+    /**
+     * Count of currently unmerged branches
+     */
+    int size(){
+        return branches.size();
+    }
+
+    /**
+     * Polls for an orphaned branch. The implementation will remove the branch
+     * from the internal list of unmerged branches.
+     *
+     * @return an orphaned branch or {@code null} if there is none at this time.
+     */
+    Branch pollOrphanedBranch() {
+        BranchReference ref = (BranchReference) queue.poll();
+        if (ref != null) {
+            if (branches.remove(ref.getBranch())) {
+                return ref.getBranch();
+            }
+        }
+        return null;
     }
 }

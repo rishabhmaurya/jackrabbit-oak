@@ -288,7 +288,7 @@ public class DataStoreBlobStore implements DataStore, BlobStore, GarbageCollecta
                 });
                 return new ByteArrayInputStream(content);
             } catch (ExecutionException e) {
-                log.warn("Error occurred while loading bytes from steam while fetching for id {}", encodedBlobId);
+                log.warn("Error occurred while loading bytes from steam while fetching for id {}", encodedBlobId, e);
             }
         }
         return getStream(blobId.blobId);
@@ -381,10 +381,9 @@ public class DataStoreBlobStore implements DataStore, BlobStore, GarbageCollecta
                 DataRecord dataRecord = delegate.getRecord(identifier);
                 boolean success = (maxLastModifiedTime <= 0)
                         || dataRecord.getLastModified() <= maxLastModifiedTime;
-                if (!success) {
-                    return false;
+                if (success) {
+                    ((MultiDataStoreAware) delegate).deleteRecord(identifier);
                 }
-                ((MultiDataStoreAware) delegate).deleteRecord(identifier);
             }
         }
         return true;

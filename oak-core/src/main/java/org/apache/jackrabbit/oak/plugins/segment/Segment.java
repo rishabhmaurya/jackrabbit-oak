@@ -41,6 +41,14 @@ import org.apache.jackrabbit.oak.plugins.memory.PropertyStates;
 
 import com.google.common.base.Charsets;
 
+/**
+ * A list of records.
+ * <p>
+ * Record data is not kept in memory, but some entries are cached (templates,
+ * all strings in the segment).
+ * <p>
+ * This class includes method to read records from the raw bytes.
+ */
 public class Segment {
 
     /**
@@ -61,7 +69,7 @@ public class Segment {
      * The number of bytes (or bits of address space) to use for the
      * alignment boundary of segment records.
      */
-    static final int RECORD_ALIGN_BITS = 2; // align at the four-byte boundary
+    public static final int RECORD_ALIGN_BITS = 2; // align at the four-byte boundary
 
     /**
      * Maximum segment size. Record identifiers are stored as three-byte
@@ -180,6 +188,16 @@ public class Segment {
     }
 
     SegmentId getRefId(int index) {
+        if (refids == null || index >= refids.length) {
+            String type = "data";
+            if (!id.isDataSegmentId()) {
+                type = "bulk";
+            }
+            long delta = System.currentTimeMillis() - id.getCreationTime();
+            throw new IllegalStateException("RefId '" + index
+                    + "' doesn't exist in " + type + " segment " + id
+                    + ". Creation date delta is " + delta + " ms.");
+        }
         SegmentId refid = refids[index];
         if (refid == null) {
             synchronized (this) {
@@ -454,12 +472,12 @@ public class Segment {
                 writer.format("reference %02x: %s%n", refid, getRefId(refid));
             }
             int rootcount = data.getShort(ROOT_COUNT_OFFSET) & 0xffff;
-            int pos = refcount * 16;
+            int pos = data.position() + refcount * 16;
             for (int rootid = 0; rootid < rootcount; rootid++) {
                 writer.format(
-                        "root %d: %s at %04x%n", rootid,
+                            "root %d: %s at %04x%n", rootid,
                         RecordType.values()[data.get(pos + rootid * 3) & 0xff],
-                        data.getShort(pos + rootid * 3 + 1) & 0xffff);
+                            data.getShort(pos + rootid * 3 + 1) & 0xffff);
             }
             int blobrefcount = data.getShort(BLOBREF_COUNT_OFFSET) & 0xffff;
             pos += rootcount * 3;

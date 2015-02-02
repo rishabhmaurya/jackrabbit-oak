@@ -35,12 +35,24 @@ import org.apache.jackrabbit.oak.spi.state.NodeStateDiff;
 import com.google.common.base.Objects;
 import com.google.common.collect.ComparisonChain;
 
+/**
+ * A map. The top level record is either a record of type "BRANCH" or "LEAF"
+ * (depending on the data).
+ */
 class MapRecord extends Record {
 
+    /**
+     * Magic constant from a random number generator, used to generate
+     * good hash values.
+     */
     private static final int M = 0xDEECE66D;
     private static final int A = 0xB;
     static final long HASH_MASK = 0xFFFFFFFFL;
 
+    /**
+     * Generates a hash code for the value, using a random number generator
+     * to improve the distribution of the hash values.
+     */
     static int getHash(String name) {
         return (name.hashCode() ^ M) * M + A;
     }
@@ -63,12 +75,14 @@ class MapRecord extends Record {
 
     /**
      * Number of bits needed to indicate the current trie level.
+     * Currently 4.
      */
     protected static final int LEVEL_BITS = // 4, using nextPowerOfTwo():
             numberOfTrailingZeros(highestOneBit(MAX_NUMBER_OF_LEVELS) << 1);
 
     /**
      * Number of bits used to indicate the size of a map.
+     * Currently 28.
      */
     protected static final int SIZE_BITS = 32 - LEVEL_BITS;
 

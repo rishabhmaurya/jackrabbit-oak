@@ -32,7 +32,7 @@ import org.apache.jackrabbit.oak.api.QueryEngine;
 import org.apache.jackrabbit.oak.api.Root;
 import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.apache.jackrabbit.oak.plugins.index.property.PropertyIndexProvider;
-import org.apache.jackrabbit.oak.plugins.tree.ImmutableTree;
+import org.apache.jackrabbit.oak.plugins.tree.impl.ImmutableTree;
 import org.apache.jackrabbit.oak.query.ExecutionContext;
 import org.apache.jackrabbit.oak.query.QueryEngineImpl;
 import org.apache.jackrabbit.oak.query.QueryEngineSettings;
@@ -65,6 +65,14 @@ public final class ImmutableRoot implements Root {
     public ImmutableRoot(@Nonnull ImmutableTree rootTree) {
         checkArgument(rootTree.isRoot());
         this.rootTree = rootTree;
+    }
+
+    public static ImmutableRoot getInstance(@Nonnull Root root) {
+        if (root instanceof ImmutableRoot) {
+            return (ImmutableRoot) root;
+        } else {
+            return new ImmutableRoot(root);
+        }
     }
 
     //---------------------------------------------------------------< Root >---

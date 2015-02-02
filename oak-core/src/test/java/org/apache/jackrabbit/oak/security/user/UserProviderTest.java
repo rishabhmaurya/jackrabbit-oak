@@ -18,16 +18,23 @@ package org.apache.jackrabbit.oak.security.user;
 
 import java.util.HashMap;
 import java.util.Map;
+import javax.annotation.Nonnull;
 import javax.jcr.RepositoryException;
+import javax.jcr.nodetype.NodeDefinition;
+import javax.jcr.nodetype.NodeType;
+import javax.jcr.nodetype.PropertyDefinition;
 
 import org.apache.jackrabbit.oak.Oak;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.Root;
 import org.apache.jackrabbit.oak.api.Tree;
+import org.apache.jackrabbit.oak.namepath.NamePathMapper;
 import org.apache.jackrabbit.oak.plugins.index.property.PropertyIndexEditorProvider;
+import org.apache.jackrabbit.oak.plugins.nodetype.ReadOnlyNodeTypeManager;
 import org.apache.jackrabbit.oak.plugins.nodetype.write.InitialContent;
 import org.apache.jackrabbit.oak.spi.security.ConfigurationParameters;
 import org.apache.jackrabbit.oak.spi.security.OpenSecurityProvider;
+import org.apache.jackrabbit.oak.spi.security.user.AuthorizableNodeName;
 import org.apache.jackrabbit.oak.spi.security.user.UserConstants;
 import org.apache.jackrabbit.oak.spi.security.user.util.UserUtil;
 import org.apache.jackrabbit.util.Text;
@@ -74,6 +81,7 @@ public class UserProviderTest {
 
     @After
     public void tearDown() {
+        root.refresh();
         root = null;
     }
 
@@ -295,6 +303,64 @@ public class UserProviderTest {
         if (up.getAuthorizable("bb") != null) {
             fail("Removing the top authorizable folder must remove all users contained.");
             u2.remove();
+        }
+    }
+
+    @Test
+    public void testCollisions() throws Exception {
+        ConfigurationParameters config = ConfigurationParameters.of(UserConstants.PARAM_AUTHORIZABLE_NODE_NAME, new AuthorizableNodeName() {
+            @Nonnull
+            @Override
+            public String generateNodeName(@Nonnull String authorizableId) {
+                return "aaa";
+            }
+        });
+        UserProvider up = new UserProvider(root, config);
+
+        try {
+            Tree u1 = up.createUser("a", null);
+            assertEquals("aaa", u1.getName());
+            Tree u2 = up.createUser("b", null);
+            assertEquals("aaa1", u2.getName());
+            Tree u3 = up.createUser("c", null);
+            assertEquals("aaa2", u3.getName());
+            Tree u4 = up.createUser("d", null);
+            assertEquals("aaa3", u4.getName());
+        } finally {
+            root.refresh();
+        }
+    }
+
+    @Test
+    public void testAutoCreatedItemsUponUserCreation() throws Exception {
+        UserProvider up = createUserProvider();
+        assertAutoCreatedItems(up.createUser("c", null), UserConstants.NT_REP_USER, root);
+    }
+
+    @Test
+    public void testAutoCreatedItemsUponSystemUserCreation() throws Exception {
+        UserProvider up = createUserProvider();
+        assertAutoCreatedItems(up.createSystemUser("s", null), UserConstants.NT_REP_SYSTEM_USER, root);
+    }
+
+    @Test
+    public void testAutoCreatedItemsUponGroupCreation() throws Exception {
+        UserProvider up = createUserProvider();
+        assertAutoCreatedItems(up.createGroup("g", null), UserConstants.NT_REP_GROUP, root);
+    }
+
+    private static void assertAutoCreatedItems(@Nonnull Tree authorizableTree, @Nonnull String ntName, @Nonnull Root root) throws Exception {
+        NodeType repUser = ReadOnlyNodeTypeManager.getInstance(root, NamePathMapper.DEFAULT).getNodeType(ntName);
+        for (NodeDefinition cnd : repUser.getChildNodeDefinitions()) {
+            if (cnd.isAutoCreated()) {
+                assertTrue(authorizableTree.hasChild(cnd.getName()));
+            }
+        }
+
+        for (PropertyDefinition pd : repUser.getPropertyDefinitions()) {
+            if (pd.isAutoCreated()) {
+                assertTrue(authorizableTree.hasProperty(pd.getName()));
+            }
         }
     }
 }

@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.jackrabbit.oak.api.PropertyValue;
 import org.apache.jackrabbit.oak.api.QueryEngine;
@@ -36,11 +37,16 @@ import org.apache.jackrabbit.oak.query.xpath.XPathToSQL2Converter;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 /**
  * The query engine implementation.
  */
 public abstract class QueryEngineImpl implements QueryEngine {
+
+    private static final AtomicInteger ID_COUNTER = new AtomicInteger();
+    private static final String MDC_QUERY_ID = "oak.query.id";
+    private static final String OAK_QUERY_ANALYZE = "oak.query.analyze";
 
     static final String SQL2 = "JCR-SQL2";
     static final String SQL = "sql";
@@ -93,7 +99,13 @@ public abstract class QueryEngineImpl implements QueryEngine {
     private static Query parseQuery(
             String statement, String language, ExecutionContext context,
             Map<String, String> mappings) throws ParseException {
-        LOG.debug("Parsing {} statement: {}", language, statement);
+        
+        boolean isInternal = SQL2Parser.isInternal(statement);
+        if (isInternal) {
+            LOG.trace("Parsing {} statement: {}", language, statement);
+        } else {
+            LOG.debug("Parsing {} statement: {}", language, statement);
+        }
 
         NamePathMapper mapper = new NamePathMapperImpl(
                 new LocalNameMapper(context.getRoot(), mappings));
@@ -164,12 +176,40 @@ public abstract class QueryEngineImpl implements QueryEngine {
             }
         }
         q.setTraversalEnabled(traversalEnabled);
-        q.prepare();
-        return q.executeQuery();
+
+        boolean mdc = false;
+        try {
+            mdc = setupMDC(q);
+            q.prepare();
+            return q.executeQuery();
+        } finally {
+            if (mdc) {
+                clearMDC();
+            }
+        }
     }
 
     protected void setTraversalEnabled(boolean traversalEnabled) {
         this.traversalEnabled = traversalEnabled;
+    }
+
+    private static boolean setupMDC(Query q) {
+        boolean mdcEnabled = false;
+        if (q.isMeasureOrExplainEnabled()) {
+            MDC.put(OAK_QUERY_ANALYZE, Boolean.TRUE.toString());
+            mdcEnabled = true;
+        }
+
+        if (LOG.isDebugEnabled()) {
+            MDC.put(MDC_QUERY_ID, String.valueOf(ID_COUNTER.incrementAndGet()));
+            mdcEnabled = true;
+        }
+        return mdcEnabled;
+    }
+
+    private static void clearMDC() {
+        MDC.remove(MDC_QUERY_ID);
+        MDC.remove(OAK_QUERY_ANALYZE);
     }
 
 }

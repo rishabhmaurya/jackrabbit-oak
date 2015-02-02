@@ -23,6 +23,8 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.Set;
 
+import javax.annotation.Nullable;
+
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.plugins.memory.MultiStringPropertyState;
@@ -30,6 +32,7 @@ import org.apache.jackrabbit.oak.spi.query.Filter;
 import org.apache.jackrabbit.oak.spi.state.ChildNodeEntry;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
+import org.apache.jackrabbit.oak.util.ApproximateCounter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -47,6 +50,8 @@ public class UniqueEntryStoreStrategy implements IndexStoreStrategy {
     @Override
     public void update(
             NodeBuilder index, String path,
+            @Nullable final String indexName,
+            @Nullable final NodeBuilder indexMeta,
             Set<String> beforeKeys, Set<String> afterKeys) {
         for (String key : beforeKeys) {
             remove(index, key, path);
@@ -57,6 +62,7 @@ public class UniqueEntryStoreStrategy implements IndexStoreStrategy {
     }
 
     private static void remove(NodeBuilder index, String key, String value) {
+        ApproximateCounter.adjustCountSync(index, -1);
         NodeBuilder builder = index.getChildNode(key);
         if (builder.exists()) {
             // there could be (temporarily) multiple entries
@@ -77,8 +83,9 @@ public class UniqueEntryStoreStrategy implements IndexStoreStrategy {
             }
         }
     }
-
+    
     private static void insert(NodeBuilder index, String key, String value) {
+        ApproximateCounter.adjustCountSync(index, 1);
         NodeBuilder k = index.child(key);
         ArrayList<String> list = new ArrayList<String>();
         list.add(value);
@@ -142,13 +149,22 @@ public class UniqueEntryStoreStrategy implements IndexStoreStrategy {
     }
 
     @Override
-    public long count(NodeState indexMeta, Set<String> values, int max) {
+    public long count(NodeState root, NodeState indexMeta, Set<String> values, int max) {
         NodeState index = indexMeta.getChildNode(INDEX_CONTENT_NODE_NAME);
         long count = 0;
         if (values == null) {
             PropertyState ec = indexMeta.getProperty(ENTRY_COUNT_PROPERTY_NAME);
             if (ec != null) {
-                return ec.getValue(Type.LONG);
+                count = ec.getValue(Type.LONG);
+                if (count >= 0) {
+                    return count;
+                }
+            }
+            if (count == 0) {
+                long approxCount = ApproximateCounter.getCountSync(index);
+                if (approxCount != -1) {
+                    return approxCount;
+                }
             }
             count = 1 + index.getChildNodeCount(max);
             // "is not null" queries typically read more data
@@ -166,4 +182,9 @@ public class UniqueEntryStoreStrategy implements IndexStoreStrategy {
         return count;
     }
 
+    @Override
+    public long count(final Filter filter, NodeState root, NodeState indexMeta, Set<String> values, int max) {
+        return count(root, indexMeta, values, max);
+    }
+    
 }

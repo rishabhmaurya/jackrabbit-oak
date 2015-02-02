@@ -66,6 +66,7 @@ import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
 import org.apache.jackrabbit.JcrConstants;
+import org.apache.jackrabbit.api.JackrabbitNode;
 import org.apache.jackrabbit.api.observation.JackrabbitEventFilter;
 import org.apache.jackrabbit.api.observation.JackrabbitObservationManager;
 import org.apache.jackrabbit.oak.api.PropertyState;
@@ -589,6 +590,29 @@ public class ObservationTest extends AbstractRepositoryTest {
     }
 
     @Test
+    public void testRename() throws RepositoryException, ExecutionException, InterruptedException {
+        Node testNode = getNode(TEST_PATH);
+        Session session = testNode.getSession();
+        Node nodeA = testNode.addNode("a");
+        String parentPath = testNode.getPath();
+        session.save();
+        assumeTrue(nodeA instanceof JackrabbitNode);
+
+        ExpectationListener listener = new ExpectationListener();
+        observationManager.addEventListener(listener, NODE_MOVED, "/", true, null, null, false);
+
+        ((JackrabbitNode) nodeA).rename("b");
+        listener.expectMove(parentPath + "/a", parentPath + "/b");
+
+        session.save();
+
+        List<Expectation> missing = listener.getMissing(TIME_OUT, TimeUnit.SECONDS);
+        assertTrue("Missing events: " + missing, missing.isEmpty());
+        List<Event> unexpected = listener.getUnexpected();
+        assertTrue("Unexpected events: " + unexpected, unexpected.isEmpty());
+    }
+
+    @Test
     public void testReorder() throws RepositoryException, InterruptedException, ExecutionException {
         Node testNode = getNode(TEST_PATH);
         Node nodeA = testNode.addNode("a", "nt:unstructured");
@@ -686,7 +710,7 @@ public class ObservationTest extends AbstractRepositoryTest {
     @Test
     public void filterDisjunctPaths()
             throws ExecutionException, InterruptedException, RepositoryException {
-        assumeTrue(observationManager instanceof ObservationManagerImpl);
+        assumeTrue(observationManager instanceof JackrabbitObservationManager);
         ObservationManagerImpl oManager = (ObservationManagerImpl) observationManager;
         ExpectationListener listener = new ExpectationListener();
         FilterBuilder builder = new FilterBuilder();
@@ -755,6 +779,58 @@ public class ObservationTest extends AbstractRepositoryTest {
 
         listener.expect(b.getPath(), NODE_ADDED);
         testNode.getSession().save();
+
+        List<Expectation> missing = listener.getMissing(TIME_OUT, TimeUnit.SECONDS);
+        assertTrue("Missing events: " + missing, missing.isEmpty());
+        List<Event> unexpected = listener.getUnexpected();
+        assertTrue("Unexpected events: " + unexpected, unexpected.isEmpty());
+    }
+
+    @Test
+    public void pathExclude() throws ExecutionException, InterruptedException, RepositoryException {
+        assumeTrue(observationManager instanceof JackrabbitObservationManager);
+        JackrabbitObservationManager oManager = (JackrabbitObservationManager) observationManager;
+        ExpectationListener listener = new ExpectationListener();
+        JackrabbitEventFilter filter = new JackrabbitEventFilter()
+                .setAbsPath(TEST_PATH)
+                .setIsDeep(true)
+                .setExcludedPaths(TEST_PATH + "/c", TEST_PATH + "/d",  "/x/y")
+                .setEventTypes(ALL_EVENTS);
+        oManager.addEventListener(listener, filter);
+
+        Node n = getNode(TEST_PATH);
+        listener.expectAdd(listener.expectAdd(
+                listener.expectAdd(n.addNode("a")).addNode("a1")).setProperty("p", "q"));
+        listener.expectAdd(
+                listener.expectAdd(n.addNode("b")).setProperty("p", "q"));
+        n.addNode("c").addNode("c1").setProperty("p", "q");
+        n.addNode("d").setProperty("p", "q");
+        getAdminSession().save();
+
+        List<Expectation> missing = listener.getMissing(TIME_OUT, TimeUnit.SECONDS);
+        assertTrue("Missing events: " + missing, missing.isEmpty());
+        List<Event> unexpected = listener.getUnexpected();
+        assertTrue("Unexpected events: " + unexpected, unexpected.isEmpty());
+    }
+
+    @Test
+    public void parentPathExclude() throws ExecutionException, InterruptedException, RepositoryException {
+        assumeTrue(observationManager instanceof JackrabbitObservationManager);
+
+        Node n = getNode(TEST_PATH).addNode("n");
+        getAdminSession().save();
+
+        JackrabbitObservationManager oManager = (JackrabbitObservationManager) observationManager;
+        ExpectationListener listener = new ExpectationListener();
+        JackrabbitEventFilter filter = new JackrabbitEventFilter()
+                .setAbsPath(n.getPath())
+                .setIsDeep(true)
+                .setExcludedPaths(n.getParent().getPath())
+                .setEventTypes(ALL_EVENTS);
+        oManager.addEventListener(listener, filter);
+
+        n.addNode("n1");
+        getAdminSession().save();
 
         List<Expectation> missing = listener.getMissing(TIME_OUT, TimeUnit.SECONDS);
         assertTrue("Missing events: " + missing, missing.isEmpty());

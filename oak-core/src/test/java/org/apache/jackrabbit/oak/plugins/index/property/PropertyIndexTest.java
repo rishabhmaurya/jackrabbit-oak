@@ -23,6 +23,7 @@ import static org.apache.jackrabbit.JcrConstants.NT_FILE;
 import static org.apache.jackrabbit.JcrConstants.NT_UNSTRUCTURED;
 import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.INDEX_DEFINITIONS_NAME;
 import static org.apache.jackrabbit.oak.plugins.index.IndexUtils.createIndexDefinition;
+import static org.apache.jackrabbit.oak.plugins.index.counter.NodeCounterEditor.COUNT_PROPERTY_NAME;
 import static org.apache.jackrabbit.oak.plugins.memory.EmptyNodeState.EMPTY_NODE;
 import static org.apache.jackrabbit.oak.plugins.nodetype.NodeTypeConstants.JCR_NODE_TYPES;
 import static org.apache.jackrabbit.oak.plugins.nodetype.write.InitialContent.INITIAL_CONTENT;
@@ -68,8 +69,10 @@ public class PropertyIndexTest {
 
         // Add index definition
         NodeBuilder builder = root.builder();
-        createIndexDefinition(builder.child(INDEX_DEFINITIONS_NAME), "foo",
+        NodeBuilder index = createIndexDefinition(builder.child(INDEX_DEFINITIONS_NAME), "foo",
                 true, false, ImmutableSet.of("foo"), null);
+        // disable the estimation
+        index.setProperty("entryCount", -1);        
         NodeState before = builder.getNodeState();
 
         // Add some content and process it through the property index hook
@@ -100,6 +103,63 @@ public class PropertyIndexTest {
         cost = lookup.getCost(f, "foo", PropertyValues.newString(
                 Arrays.asList("x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x0")));
         assertTrue("cost: " + cost, cost >= 51.5 && cost <= 52.5);
+
+        cost = lookup.getCost(f, "foo", null);
+        assertTrue("cost: " + cost, cost >= MANY);
+    }
+
+    /**
+     * This is essentially same test as {@link #costEstimation()} with one difference that it uses
+     * path constraint in query and creates similar trees under 2 branches {@code path1} and {@code path2}.
+     * The cost estimation is then verified to be same as that in {@code costEstimation} for query under {@code path1}
+     * @throws Exception
+     */
+    @Test
+    public void pathBasedCostEstimation() throws Exception {
+        NodeState root = INITIAL_CONTENT;
+
+        // Add index definition
+        NodeBuilder builder = root.builder();
+        NodeBuilder index = createIndexDefinition(builder.child(INDEX_DEFINITIONS_NAME), "foo",
+                true, false, ImmutableSet.of("foo"), null);
+        // disable the estimation
+        index.setProperty("entryCount", -1);
+        builder.setProperty(COUNT_PROPERTY_NAME, (long) MANY * 2, Type.LONG);
+        NodeState before = builder.getNodeState();
+
+        NodeBuilder path1 = builder.child("path1");
+        NodeBuilder path2 = builder.child("path2");
+        // Add some content and process it through the property index hook
+        for (int i = 0; i < MANY; i++) {
+            path1.child("n" + i).setProperty("foo", "x" + i % 20);
+            path2.child("n" + i).setProperty("foo", "x" + i % 20);
+        }
+        path1.setProperty(COUNT_PROPERTY_NAME, (long) MANY, Type.LONG);
+        NodeState after = builder.getNodeState();
+
+        NodeState indexed = HOOK.processCommit(before, after, CommitInfo.EMPTY);
+
+        FilterImpl f = createFilter(indexed, NT_BASE);
+        f.restrictPath("/path1", Filter.PathRestriction.ALL_CHILDREN);
+
+        // Query the index
+        PropertyIndexLookup lookup = new PropertyIndexLookup(indexed);
+        double cost;
+
+        cost = lookup.getCost(f, "foo", PropertyValues.newString("x1"));
+        assertTrue("cost: " + cost, cost >= 7.5 && cost <= 8.5);
+
+        cost = lookup.getCost(f, "foo", PropertyValues.newString(
+                Arrays.asList("x1", "x2")));
+        assertTrue("cost: " + cost, cost >= 14.5 && cost <= 15.5);
+
+        cost = lookup.getCost(f, "foo", PropertyValues.newString(
+                Arrays.asList("x1", "x2", "x3", "x4", "x5")));
+        assertTrue("cost: " + cost, cost >= 34.5 && cost <= 35.5);
+
+        cost = lookup.getCost(f, "foo", PropertyValues.newString(
+                Arrays.asList("x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x0")));
+        assertTrue("cost: " + cost, cost >= 81.5 && cost <= 82.5);
 
         cost = lookup.getCost(f, "foo", null);
         assertTrue("cost: " + cost, cost >= MANY);
@@ -138,6 +198,10 @@ public class PropertyIndexTest {
             NodeBuilder c = data.child("c_" + i);
             c.setProperty("foo", "azerty");
         }
+        // add more nodes (to make traversal more expensive)
+        for (int i = 0; i < 10000; i++) {
+            data.child("cx_" + i);
+        }
         NodeState after = builder.getNodeState();
         NodeState indexed = HOOK.processCommit(before, after, CommitInfo.EMPTY);
 
@@ -149,7 +213,7 @@ public class PropertyIndexTest {
         double traversal = new TraversingIndex().getCost(f, indexed);
 
         assertTrue("Estimated cost for " + nodes
-                + " nodes should not be higher than traversal (" + cost + ")",
+                + " nodes should not be higher than traversal (" + cost + " < " + traversal + ")",
                 cost < traversal);
     }
 
@@ -159,8 +223,9 @@ public class PropertyIndexTest {
 
         // Add index definition
         NodeBuilder builder = root.builder();
-        createIndexDefinition(builder.child(INDEX_DEFINITIONS_NAME), "foo",
+        NodeBuilder index = createIndexDefinition(builder.child(INDEX_DEFINITIONS_NAME), "foo",
                 true, false, ImmutableSet.of("foo"), null);
+        index.setProperty("entryCount", -1);
         NodeState before = builder.getNodeState();
 
         // Add some content and process it through the property index hook
@@ -190,6 +255,32 @@ public class PropertyIndexTest {
         assertTrue("cost: " + cost, cost >= MANY);
         cost = lookup.getCost(f, "foo", null);
         assertTrue("cost: " + cost, cost >= MANY);
+    }
+
+    @Test
+    public void testPathAwarePropertyLookup() throws Exception {
+        NodeState root = INITIAL_CONTENT;
+
+        // Add index definition
+        NodeBuilder builder = root.builder();
+        createIndexDefinition(builder.child(INDEX_DEFINITIONS_NAME), "foo",
+                true, false, ImmutableSet.of("foo"), null);
+        NodeState before = builder.getNodeState();
+
+        // Add some content and process it through the property index hook
+        builder.child("a").setProperty("foo", "abc");
+        builder.child("b").setProperty("foo", "abc");
+
+        NodeState after = builder.getNodeState();
+
+        NodeState indexed = HOOK.processCommit(before, after, CommitInfo.EMPTY);
+
+        FilterImpl f = createFilter(indexed, NT_BASE);
+        f.restrictPath("/a", Filter.PathRestriction.ALL_CHILDREN);
+
+        // Query the index
+        PropertyIndexLookup lookup = new PropertyIndexLookup(indexed);
+        assertEquals(ImmutableSet.of("a"), find(lookup, "foo", "abc", f));
     }
 
     private static Set<String> find(PropertyIndexLookup lookup, String name,

@@ -30,7 +30,6 @@ import javax.jcr.version.VersionManager;
 
 import org.apache.jackrabbit.test.NotExecutableException;
 import org.junit.Before;
-import org.junit.Ignore;
 import org.junit.Test;
 
 /**
@@ -49,7 +48,9 @@ public class VersionManagementTest extends AbstractEvaluationTest {
         super.setUp();
 
         versionPrivileges = privilegesFromName(Privilege.JCR_VERSION_MANAGEMENT);
-        assertFalse(testAcMgr.hasPrivileges(VERSIONSTORE, versionPrivileges));
+        // must not see version storage or must not have version privilege
+        assertTrue(!testSession.nodeExists(VERSIONSTORE)
+                || !testAcMgr.hasPrivileges(VERSIONSTORE, versionPrivileges));
     }
 
     private Node createVersionableNode(Node parent) throws Exception {
@@ -192,39 +193,6 @@ public class VersionManagementTest extends AbstractEvaluationTest {
     }
 
     /**
-     * @since oak
-     */
-    @Test
-    public void testAccessVersionContentWithoutStoreAccess() throws Exception {
-        Node n = createVersionableNode(superuser.getNode(path));
-        Version v = n.checkin();
-        VersionHistory vh = n.getVersionHistory();
-        n.checkout();
-        Version v2 = n.checkin();
-        n.checkout();
-
-        testSession.refresh(false);
-        assertFalse(testAcMgr.hasPrivileges(n.getPath(), versionPrivileges));
-        AccessControlList acl = deny(SYSTEM, privilegesFromName(Privilege.JCR_READ));
-
-        try {
-            // version information must still be accessible
-            assertTrue(testSession.nodeExists(v.getPath()));
-            assertTrue(testSession.nodeExists(v2.getPath()));
-            assertTrue(testSession.nodeExists(vh.getPath()));
-
-        } finally {
-            for (AccessControlEntry entry : acl.getAccessControlEntries()) {
-                if (entry.getPrincipal().equals(testUser.getPrincipal())) {
-                    acl.removeAccessControlEntry(entry);
-                }
-            }
-            acMgr.setPolicy(SYSTEM, acl);
-            superuser.save();
-        }
-    }
-
-    /**
      * @since oak (DIFF: jr required jcr:versionManagement privilege on the version store)
      */
     @Test
@@ -349,6 +317,30 @@ public class VersionManagementTest extends AbstractEvaluationTest {
         VersionManager vMgr = testSession.getWorkspace().getVersionManager();
         history = vMgr.getVersionHistory(testNode.getPath());
         history.addVersionLabel(v.getName(), "testLabel", true);
+    }
+
+    /**
+     * @since oak
+     */
+    @Test
+    public void testRemoveVersionLabel() throws Exception {
+        Node n = createVersionableNode(superuser.getNode(path));
+        allow(n.getPath(), versionPrivileges);
+
+        Node testNode = testSession.getNode(n.getPath());
+        Version v = testNode.checkin();
+        testNode.checkout();
+        Version v2 = testNode.checkin();
+        testNode.checkout();
+
+        // -> VersionHistory.addVersionLabel must be allowed
+        VersionHistory history = testNode.getVersionHistory();
+        history.addVersionLabel(v.getName(), "testLabel", false);
+        history.addVersionLabel(v2.getName(), "testLabel", true);
+
+        VersionManager vMgr = testSession.getWorkspace().getVersionManager();
+        history = vMgr.getVersionHistory(testNode.getPath());
+        history.removeVersionLabel("testLabel");
     }
 
     /**

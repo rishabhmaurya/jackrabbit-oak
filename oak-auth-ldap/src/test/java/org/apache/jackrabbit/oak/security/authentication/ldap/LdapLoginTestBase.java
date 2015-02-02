@@ -158,9 +158,9 @@ public abstract class LdapLoginTestBase extends ExternalLoginModuleTestBase {
                 .setBaseDN(ServerDNConstants.GROUPS_SYSTEM_DN)
                 .setObjectClasses(InternalLdapServer.GROUP_CLASS_ATTR);
 
-        LdapIdentityProvider ldapIDP = new LdapIdentityProvider(cfg);
-        ldapIDP.disableConnectionPooling = true;
-        return ldapIDP;
+        cfg.getAdminPoolConfig().setMaxActive(0);
+        cfg.getUserPoolConfig().setMaxActive(0);
+        return new LdapIdentityProvider(cfg);
     }
 
     @Override
@@ -207,6 +207,28 @@ public abstract class LdapLoginTestBase extends ExternalLoginModuleTestBase {
         ContentSession cs = null;
         try {
             cs = login(new SimpleCredentials(USER_ID, USER_PWD.toCharArray()));
+
+            root.refresh();
+            Authorizable user = userManager.getAuthorizable(USER_ID);
+            assertNotNull(user);
+            assertTrue(user.hasProperty(USER_PROP));
+            Tree userTree = cs.getLatestRoot().getTree(user.getPath());
+            assertFalse(userTree.hasProperty(UserConstants.REP_PASSWORD));
+
+            assertNull(userManager.getAuthorizable(GROUP_DN));
+        } finally {
+            if (cs != null) {
+                cs.close();
+            }
+            options.clear();
+        }
+    }
+
+    @Test
+    public void testSyncCreateUserCaseInsensitive() throws Exception {
+        ContentSession cs = null;
+        try {
+            cs = login(new SimpleCredentials(USER_ID.toUpperCase(), USER_PWD.toCharArray()));
 
             root.refresh();
             Authorizable user = userManager.getAuthorizable(USER_ID);
