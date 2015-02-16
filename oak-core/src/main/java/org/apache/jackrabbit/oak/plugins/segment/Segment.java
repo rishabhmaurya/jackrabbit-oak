@@ -16,6 +16,7 @@
  */
 package org.apache.jackrabbit.oak.plugins.segment;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkPositionIndexes;
 import static com.google.common.base.Preconditions.checkState;
@@ -34,12 +35,11 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ConcurrentMap;
 
+import com.google.common.base.Charsets;
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.plugins.blob.ReferenceCollector;
 import org.apache.jackrabbit.oak.plugins.memory.PropertyStates;
-
-import com.google.common.base.Charsets;
 
 /**
  * A list of records.
@@ -187,6 +187,23 @@ public class Segment {
         return (data.get(REF_COUNT_OFFSET) & 0xff) + 1;
     }
 
+    public int getRootCount() {
+        return data.getShort(ROOT_COUNT_OFFSET) & 0xffff;
+    }
+
+    public RecordType getRootType(int index) {
+        int refCount = getRefCount();
+        checkArgument(index < getRootCount());
+        return RecordType.values()[data.get(data.position() + refCount * 16 + index * 3) & 0xff];
+    }
+
+    public int getRootOffset(int index) {
+        int refCount = getRefCount();
+        checkArgument(index < getRootCount());
+        return (data.getShort(data.position() + refCount * 16 + index * 3 + 1) & 0xffff)
+                << RECORD_ALIGN_BITS;
+    }
+
     SegmentId getRefId(int index) {
         if (refids == null || index >= refids.length) {
             String type = "data";
@@ -292,7 +309,7 @@ public class Segment {
      * @param offset offset within target buffer
      * @param length number of bytes to read
      */
-     void readBytes(int position, byte[] buffer, int offset, int length) {
+    void readBytes(int position, byte[] buffer, int offset, int length) {
         checkNotNull(buffer);
         checkPositionIndexes(offset, offset + length, buffer.length);
         ByteBuffer d = data.duplicate();
