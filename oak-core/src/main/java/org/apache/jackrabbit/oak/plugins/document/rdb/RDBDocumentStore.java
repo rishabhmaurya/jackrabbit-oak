@@ -49,6 +49,8 @@ import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import javax.sql.DataSource;
 
+import com.google.common.collect.ImmutableMap;
+
 import org.apache.jackrabbit.oak.cache.CacheStats;
 import org.apache.jackrabbit.oak.cache.CacheValue;
 import org.apache.jackrabbit.oak.plugins.document.Collection;
@@ -63,6 +65,7 @@ import org.apache.jackrabbit.oak.plugins.document.UpdateOp;
 import org.apache.jackrabbit.oak.plugins.document.UpdateOp.Key;
 import org.apache.jackrabbit.oak.plugins.document.UpdateOp.Operation;
 import org.apache.jackrabbit.oak.plugins.document.UpdateUtils;
+import org.apache.jackrabbit.oak.plugins.document.cache.CacheInvalidationStats;
 import org.apache.jackrabbit.oak.plugins.document.mongo.MongoDocumentStore;
 import org.apache.jackrabbit.oak.plugins.document.util.StringValue;
 import org.slf4j.Logger;
@@ -228,13 +231,13 @@ public class RDBDocumentStore implements DocumentStore {
     @Override
     public <T extends Document> void remove(Collection<T> collection, String id) {
         delete(collection, id);
-        invalidateCache(collection, id);
+        invalidateCache(collection, id, true);
     }
 
     @Override
     public <T extends Document> void remove(Collection<T> collection, List<String> ids) {
         for (String id : ids) {
-            invalidateCache(collection, id);
+            invalidateCache(collection, id, true);
         }
         delete(collection, ids);
     }
@@ -260,19 +263,38 @@ public class RDBDocumentStore implements DocumentStore {
     }
 
     @Override
-    public void invalidateCache() {
-        nodesCache.invalidateAll();
+    public CacheInvalidationStats invalidateCache() {
+        for (NodeDocument nd : nodesCache.asMap().values()) {
+            nd.markUpToDate(0);
+        }
+        return null;
     }
 
     @Override
     public <T extends Document> void invalidateCache(Collection<T> collection, String id) {
+        invalidateCache(collection, id, false);
+    }
+
+    private <T extends Document> void invalidateCache(Collection<T> collection, String id, boolean remove) {
         if (collection == Collection.NODES) {
-            Lock lock = getAndLock(id);
-            try {
-                nodesCache.invalidate(new StringValue(id));
-            } finally {
-                lock.unlock();
+            invalidateNodesCache(id, remove);
+        }
+    }
+
+    private void invalidateNodesCache(String id, boolean remove) {
+        StringValue key = new StringValue(id);
+        Lock lock = getAndLock(id);
+        try {
+            if (remove) {
+                nodesCache.invalidate(key);
+            } else {
+                NodeDocument entry = nodesCache.getIfPresent(key);
+                if (entry != null) {
+                    entry.markUpToDate(0);
+                }
             }
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -333,29 +355,63 @@ public class RDBDocumentStore implements DocumentStore {
         return this.cacheStats;
     }
 
+    @Override
+    public Map<String, String> getMetadata() {
+        return metadata;
+    }
+
     // implementation
 
     enum FETCHFIRSTSYNTAX { FETCHFIRST, LIMIT, TOP};
 
+
+    private static void versionCheck(DatabaseMetaData md, int xmaj, int xmin, String description) throws SQLException {
+        int maj = md.getDatabaseMajorVersion();
+        int min = md.getDatabaseMinorVersion();
+        if (maj < xmaj || (maj == xmaj && min < xmin)) {
+            LOG.info("Unsupported " + description + " version: " + maj + "." + min + ", expected at least " + xmaj + "." + xmin);
+        }
+    }
+
     /**
      * Defines variation in the capabilities of different RDBs.
      */
-    enum DB {
+    protected enum DB {
         DEFAULT("default") {
         },
 
-        H2("H2"),
+        H2("H2") {
+            @Override
+            public void checkVersion(DatabaseMetaData md) throws SQLException {
+                versionCheck(md, 1, 4, description);
+            }
+        },
 
         POSTGRES("PostgreSQL") {
+            @Override
+            public void checkVersion(DatabaseMetaData md) throws SQLException {
+                versionCheck(md, 9, 3, description);
+            }
+
             @Override
             public String getTableCreationStatement(String tableName) {
                 return ("create table " + tableName + " (ID varchar(512) not null primary key, MODIFIED bigint, HASBINARY smallint, DELETEDONCE smallint, MODCOUNT bigint, CMODCOUNT bigint, DSIZE bigint, DATA varchar(16384), BDATA bytea)");
             }
         },
 
-        DB2("DB2"),
+        DB2("DB2") {
+            @Override
+            public void checkVersion(DatabaseMetaData md) throws SQLException {
+                versionCheck(md, 10, 5, description);
+            }
+        },
 
         ORACLE("Oracle") {
+            @Override
+            public void checkVersion(DatabaseMetaData md) throws SQLException {
+                versionCheck(md, 12, 1, description);
+            }
+
             @Override
             public String getInitializationStatement() {
                 // see https://issues.apache.org/jira/browse/OAK-1914
@@ -371,6 +427,11 @@ public class RDBDocumentStore implements DocumentStore {
         },
 
         MYSQL("MySQL") {
+            @Override
+            public void checkVersion(DatabaseMetaData md) throws SQLException {
+                versionCheck(md, 5, 5, description);
+            }
+
             @Override
             public boolean isPrimaryColumnByteEncoded() {
                 // TODO: we should dynamically detect this
@@ -396,9 +457,20 @@ public class RDBDocumentStore implements DocumentStore {
 
         MSSQL("Microsoft SQL Server") {
             @Override
+            public void checkVersion(DatabaseMetaData md) throws SQLException {
+                versionCheck(md, 11, 0, description);
+            }
+
+            @Override
+            public boolean isPrimaryColumnByteEncoded() {
+                // TODO: we should dynamically detect this
+                return true;
+            }
+
+            @Override
             public String getTableCreationStatement(String tableName) {
                 // see https://issues.apache.org/jira/browse/OAK-2395
-                return ("create table " + tableName + " (ID nvarchar(512) not null primary key, MODIFIED bigint, HASBINARY smallint, DELETEDONCE smallint, MODCOUNT bigint, CMODCOUNT bigint, DSIZE bigint, DATA nvarchar(4000), BDATA varbinary(max))");
+                return ("create table " + tableName + " (ID varbinary(512) not null primary key, MODIFIED bigint, HASBINARY smallint, DELETEDONCE smallint, MODCOUNT bigint, CMODCOUNT bigint, DSIZE bigint, DATA nvarchar(4000), BDATA varbinary(max))");
             }
 
             @Override
@@ -422,6 +494,13 @@ public class RDBDocumentStore implements DocumentStore {
                 return "(select MAX(mod) from (VALUES (" + column + "), (?)) AS ALLMOD(mod))";
             }
         };
+
+        /**
+         * Check the database brand and version
+         */
+        public void checkVersion(DatabaseMetaData md) throws SQLException {
+            LOG.info("Unknown database type: " + md.getDatabaseProductName());
+        }
 
         /**
          * If the primary column is encoded in bytes.
@@ -494,7 +573,7 @@ public class RDBDocumentStore implements DocumentStore {
                     + 1024 * 1024 * 1024 + "))";
         }
 
-        private String description;
+        protected String description;
 
         private DB(String description) {
             this.description = description;
@@ -561,6 +640,8 @@ public class RDBDocumentStore implements DocumentStore {
     // DB-specific information
     private DB db;
 
+    private Map<String, String> metadata;
+
     // set of supported indexed properties
     private static final Set<String> INDEXEDPROPERTIES = new HashSet<String>(Arrays.asList(new String[] { MODIFIED,
             NodeDocument.HAS_BINARY_FLAG, NodeDocument.DELETED_ONCE }));
@@ -588,8 +669,15 @@ public class RDBDocumentStore implements DocumentStore {
         DatabaseMetaData md = con.getMetaData();
         String dbDesc = md.getDatabaseProductName() + " " + md.getDatabaseProductVersion();
         String driverDesc = md.getDriverName() + " " + md.getDriverVersion();
+        String dbUrl = md.getURL();
 
         this.db = DB.getValue(md.getDatabaseProductName());
+        this.metadata = ImmutableMap.<String,String>builder()
+                .put("type", "rdb")
+                .put("db", md.getDatabaseProductName())
+                .put("version", md.getDatabaseProductVersion())
+                .build();
+        db.checkVersion(md);
 
         if (! "".equals(db.getInitializationStatement())) {
             Statement stmt = con.createStatement();
@@ -607,10 +695,14 @@ public class RDBDocumentStore implements DocumentStore {
             con.close();
         }
 
-        LOG.info("RDBDocumentStore instantiated for database " + dbDesc + ", using driver: " + driverDesc);
+        LOG.info("RDBDocumentStore instantiated for database " + dbDesc + ", using driver: " + driverDesc + ", connecting to: " + dbUrl);
     }
 
     private void createTableFor(Connection con, Collection<? extends Document> col, boolean dropTablesOnClose) throws SQLException {
+        String dbname = this.db.toString();
+        if (con.getMetaData().getURL() != null) {
+            dbname += " (" + con.getMetaData().getURL() + ")";
+        }
         String tableName = getTable(col);
         try {
             PreparedStatement stmt = con.prepareStatement("select DATA from " + tableName + " where ID = ?");
@@ -622,28 +714,36 @@ public class RDBDocumentStore implements DocumentStore {
                 ResultSetMetaData met = rs.getMetaData();
                 this.dataLimitInOctets = met.getPrecision(1);
             }
+
+            LOG.info("Table " + tableName + " already present in " + dbname);
         } catch (SQLException ex) {
             // table does not appear to exist
             con.rollback();
 
-            LOG.info("Attempting to create table " + tableName + " in " + this.db);
+            try {
+                Statement stmt = con.createStatement();
+                stmt.execute(this.db.getTableCreationStatement(tableName));
+                stmt.close();
 
-            Statement stmt = con.createStatement();
-            stmt.execute(this.db.getTableCreationStatement(tableName));
-            stmt.close();
+                con.commit();
 
-            con.commit();
+                LOG.info("Created table " + tableName + " in " + dbname);
 
-            if (col.equals(Collection.NODES)) {
-                PreparedStatement pstmt = con.prepareStatement("select DATA from " + tableName + " where ID = ?");
-                pstmt.setString(1, "0:/");
-                ResultSet rs = pstmt.executeQuery();
-                ResultSetMetaData met = rs.getMetaData();
-                this.dataLimitInOctets = met.getPrecision(1);
+                if (col.equals(Collection.NODES)) {
+                    PreparedStatement pstmt = con.prepareStatement("select DATA from " + tableName + " where ID = ?");
+                    pstmt.setString(1, "0:/");
+                    ResultSet rs = pstmt.executeQuery();
+                    ResultSetMetaData met = rs.getMetaData();
+                    this.dataLimitInOctets = met.getPrecision(1);
+                }
+
+                if (dropTablesOnClose) {
+                    tablesToBeDropped.add(tableName);
+                }
             }
-
-            if (dropTablesOnClose) {
-                tablesToBeDropped.add(tableName);
+            catch (SQLException ex2) {
+                LOG.error("Failed to create table " + tableName + " in " + dbname, ex2);
+                throw ex2;
             }
         }
     }
@@ -665,37 +765,48 @@ public class RDBDocumentStore implements DocumentStore {
                 // first try without lock
                 doc = nodesCache.getIfPresent(cacheKey);
                 if (doc != null) {
-                    if (maxCacheAge == Integer.MAX_VALUE || System.currentTimeMillis() - doc.getLastCheckTime() < maxCacheAge) {
-                        return castAsT(unwrap(doc));
+                    long lastCheckTime = doc.getLastCheckTime();
+                    if (lastCheckTime != 0) {
+                        if (maxCacheAge == Integer.MAX_VALUE || System.currentTimeMillis() - lastCheckTime < maxCacheAge) {
+                            return castAsT(unwrap(doc));
+                        }
                     }
                 }
             }
             try {
                 Lock lock = getAndLock(id);
-                final NodeDocument cachedDoc = doc;
                 try {
+                    // caller really wants the cache to be cleared
                     if (maxCacheAge == 0) {
-                        invalidateCache(collection, id);
+                        invalidateNodesCache(id, true);
+                        doc = null;
                     }
-                    while (true) {
-                        doc = nodesCache.get(cacheKey, new Callable<NodeDocument>() {
-                            @Override
-                            public NodeDocument call() throws Exception {
-                                NodeDocument doc = (NodeDocument) readDocumentUncached(collection, id, cachedDoc);
-                                if (doc != null) {
-                                    doc.seal();
-                                }
-                                return wrap(doc);
+                    final NodeDocument cachedDoc = doc;
+                    doc = nodesCache.get(cacheKey, new Callable<NodeDocument>() {
+                        @Override
+                        public NodeDocument call() throws Exception {
+                            NodeDocument doc = (NodeDocument) readDocumentUncached(collection, id, cachedDoc);
+                            if (doc != null) {
+                                doc.seal();
                             }
-                        });
-                        if (maxCacheAge == 0 || maxCacheAge == Integer.MAX_VALUE) {
-                            break;
+                            return wrap(doc);
                         }
-                        if (System.currentTimeMillis() - doc.getLastCheckTime() < maxCacheAge) {
-                            break;
+                    });
+                    // inspect the doc whether it can be used
+                    long lastCheckTime = doc.getLastCheckTime();
+                    if (lastCheckTime != 0 && (maxCacheAge == 0 || maxCacheAge == Integer.MAX_VALUE)) {
+                        // we either just cleared the cache or the caller does
+                        // not care;
+                    } else if (lastCheckTime != 0 && (System.currentTimeMillis() - lastCheckTime < maxCacheAge)) {
+                        // is new enough
+                    } else {
+                        // need to at least revalidate
+                        NodeDocument ndoc = (NodeDocument) readDocumentUncached(collection, id, cachedDoc);
+                        if (ndoc != null) {
+                            ndoc.seal();
                         }
-                        // too old: invalidate, try again
-                        invalidateCache(collection, id);
+                        doc = wrap(ndoc);
+                        nodesCache.put(cacheKey, doc);
                     }
                 } finally {
                     lock.unlock();
@@ -796,13 +907,13 @@ public class RDBDocumentStore implements DocumentStore {
 
                 int retries = maxRetries;
                 while (!success && retries > 0) {
-                    long lastmodcount = (Long) oldDoc.get(MODCOUNT);
+                    long lastmodcount = modcountOf(oldDoc);
                     success = updateDocument(collection, doc, update, lastmodcount);
                     if (!success) {
                         retries -= 1;
                         oldDoc = readDocumentCached(collection, update.getId(), Integer.MAX_VALUE);
                         if (oldDoc != null) {
-                            long newmodcount = (Long) oldDoc.get(MODCOUNT);
+                            long newmodcount = modcountOf(oldDoc);
                             if (lastmodcount == newmodcount) {
                                 // cached copy did not change so it probably was
                                 // updated by a different instance, get a fresh one
@@ -887,14 +998,16 @@ public class RDBDocumentStore implements DocumentStore {
                 }
                 if (success) {
                     for (Entry<String, NodeDocument> entry : cachedDocs.entrySet()) {
-                        if (entry.getValue() == null) {
+                        T oldDoc = (T) (entry.getValue());
+                        if (oldDoc == null) {
                             // make sure concurrently loaded document is
                             // invalidated
                             nodesCache.invalidate(new StringValue(entry.getKey()));
                         } else {
-                            T oldDoc = (T) (entry.getValue());
-                            T newDoc = applyChanges(collection, (T) (entry.getValue()), update, true);
-                            applyToCache((NodeDocument) oldDoc, (NodeDocument) newDoc);
+                            T newDoc = applyChanges(collection, oldDoc, update, true);
+                            if (newDoc != null) {
+                                applyToCache((NodeDocument) oldDoc, (NodeDocument) newDoc);
+                            }
                         }
                     }
                 } else {
@@ -961,8 +1074,8 @@ public class RDBDocumentStore implements DocumentStore {
         String tableName = getTable(collection);
         try {
             long lastmodcount = -1;
-            if (cachedDoc != null && cachedDoc.getModCount() != null) {
-                lastmodcount = cachedDoc.getModCount().longValue();
+            if (cachedDoc != null) {
+                lastmodcount = modcountOf(cachedDoc);
             }
             connection = this.ch.getROConnection();
             RDBRow row = dbRead(connection, tableName, id, lastmodcount);
@@ -1533,6 +1646,20 @@ public class RDBDocumentStore implements DocumentStore {
         return doc == null ? NodeDocument.NULL : doc;
     }
 
+    @Nonnull
+    private static String idOf(@Nonnull Document doc) {
+        String id = doc.getId();
+        if (id == null) {
+            throw new IllegalArgumentException("non-null ID expected");
+        }
+        return id;
+    }
+
+    private static long modcountOf(@Nonnull Document doc) {
+        Number n = doc.getModCount();
+        return n != null ? n.longValue() : -1;
+    }
+
     /**
      * Adds a document to the {@link #nodesCache} iff there is no document in
      * the cache with the document key. This method does not acquire a lock from
@@ -1555,7 +1682,7 @@ public class RDBDocumentStore implements DocumentStore {
         // meantime. That is, use get() with a Callable,
         // which is only used when the document isn't there
         try {
-            CacheValue key = new StringValue(doc.getId());
+            CacheValue key = new StringValue(idOf(doc));
             for (;;) {
                 NodeDocument cached = nodesCache.get(key, new Callable<NodeDocument>() {
                     @Override
@@ -1587,7 +1714,7 @@ public class RDBDocumentStore implements DocumentStore {
             // loading it into the cache -> return now
             return;
         } else {
-            CacheValue key = new StringValue(newDoc.getId());
+            CacheValue key = new StringValue(idOf(newDoc));
             // this is an update (oldDoc != null)
             if (Objects.equal(cached.getModCount(), oldDoc.getModCount())) {
                 nodesCache.put(key, newDoc);
@@ -1604,7 +1731,7 @@ public class RDBDocumentStore implements DocumentStore {
 
     private <T extends Document> void addToCache(Collection<T> collection, T doc) {
         if (collection == Collection.NODES) {
-            Lock lock = getAndLock(doc.getId());
+            Lock lock = getAndLock(idOf(doc));
             try {
                 addToCache((NodeDocument) doc);
             } finally {

@@ -141,6 +141,9 @@ class IndexPlanner {
             for (PropertyRestriction pr : filter.getPropertyRestrictions()) {
                 PropertyDefinition pd = indexingRule.getConfig(pr.propertyName);
                 if (pd != null && pd.propertyIndexEnabled()) {
+                    if (pr.isNullRestriction() && !pd.nullCheckEnabled){
+                        continue;
+                    }
                     indexedProps.add(pr.propertyName);
                     result.propDefns.put(pr.propertyName, pd);
                 }

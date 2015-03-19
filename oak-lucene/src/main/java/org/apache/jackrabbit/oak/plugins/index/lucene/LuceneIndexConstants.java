@@ -241,4 +241,16 @@ public interface LuceneIndexConstants {
      * whether use this property values for spellchecking
      */
     String PROP_USE_IN_SPELLCHECK = "useInSpellcheck";
+
+    /**
+     * Property definition config indicating that null check support should be
+     * enabled for this property
+     */
+    String PROP_NULL_CHECK_ENABLED = "nullCheckEnabled";
+
+    /**
+     * Property definition config indicating that this property would be used with
+     * 'IS NOT NULL' constraint
+     */
+    String PROP_NOT_NULL_CHECK_ENABLED = "notNullCheckEnabled";
 }

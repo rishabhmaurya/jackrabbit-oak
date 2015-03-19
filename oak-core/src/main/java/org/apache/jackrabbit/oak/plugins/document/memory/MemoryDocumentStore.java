@@ -28,8 +28,8 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
-import javax.jcr.RepositoryException;
 
+import com.google.common.collect.ImmutableMap;
 import org.apache.jackrabbit.oak.cache.CacheStats;
 import org.apache.jackrabbit.oak.plugins.document.Collection;
 import org.apache.jackrabbit.oak.plugins.document.Document;
@@ -44,6 +44,7 @@ import org.apache.jackrabbit.oak.plugins.document.UpdateUtils;
 import com.google.common.base.Splitter;
 import com.mongodb.ReadPreference;
 import com.mongodb.WriteConcern;
+import org.apache.jackrabbit.oak.plugins.document.cache.CacheInvalidationStats;
 
 /**
  * Emulates a MongoDB store (possibly consisting of multiple shards and
@@ -82,6 +83,14 @@ public class MemoryDocumentStore implements DocumentStore {
     private WriteConcern writeConcern;
 
     private Object lastReadWriteMode;
+
+    private final Map<String, String> metadata;
+
+    public MemoryDocumentStore() {
+        metadata = ImmutableMap.<String,String>builder()
+                        .put("type", "memory")
+                        .build();
+    }
 
     @Override
     public <T extends Document> T find(Collection<T> collection, String key, int maxCacheAge) {
@@ -290,8 +299,8 @@ public class MemoryDocumentStore implements DocumentStore {
     }
 
     @Override
-    public void invalidateCache() {
-        // there is no cache, so nothing to invalidate
+    public CacheInvalidationStats invalidateCache() {
+        return null;
     }
 
     @Override
@@ -347,6 +356,11 @@ public class MemoryDocumentStore implements DocumentStore {
     @Override
     public CacheStats getCacheStats() {
         return null;
+    }
+
+    @Override
+    public Map<String, String> getMetadata() {
+        return metadata;
     }
 
 }

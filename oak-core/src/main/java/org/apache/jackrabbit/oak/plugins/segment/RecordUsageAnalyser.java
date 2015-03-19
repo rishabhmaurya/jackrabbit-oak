@@ -20,21 +20,18 @@
 package org.apache.jackrabbit.oak.plugins.segment;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.collect.Maps.newHashMap;
-import static java.lang.System.arraycopy;
-import static java.util.Arrays.binarySearch;
 import static org.apache.commons.io.FileUtils.byteCountToDisplaySize;
 import static org.apache.jackrabbit.oak.api.Type.BINARY;
 import static org.apache.jackrabbit.oak.plugins.segment.ListRecord.LEVEL_SIZE;
 import static org.apache.jackrabbit.oak.plugins.segment.Segment.MEDIUM_LIMIT;
 import static org.apache.jackrabbit.oak.plugins.segment.Segment.RECORD_ID_BYTES;
 import static org.apache.jackrabbit.oak.plugins.segment.Segment.SMALL_LIMIT;
+import static org.apache.jackrabbit.oak.plugins.segment.SegmentVersion.V_11;
 import static org.apache.jackrabbit.oak.plugins.segment.SegmentWriter.BLOCK_SIZE;
 import static org.apache.jackrabbit.oak.plugins.segment.Template.MANY_CHILD_NODES;
 import static org.apache.jackrabbit.oak.plugins.segment.Template.ZERO_CHILD_NODES;
 
 import java.util.Formatter;
-import java.util.Map;
 
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.spi.state.ChildNodeEntry;
@@ -49,6 +46,8 @@ import org.apache.jackrabbit.oak.spi.state.NodeState;
  * space from aligning records is not accounted for.
  */
 public class RecordUsageAnalyser {
+    private final RecordIdSet seenIds = new RecordIdSet();
+
     private long mapSize;       // leaf and branch
     private long listSize;      // list and bucket
     private long valueSize;     // inlined values
@@ -197,7 +196,7 @@ public class RecordUsageAnalyser {
     }
 
     public void analyseNode(RecordId nodeId) {
-        if (notSeen(nodeId)) {
+        if (seenIds.addIfNotPresent(nodeId)) {
             nodeCount++;
             Segment segment = nodeId.getSegment();
             int offset = nodeId.getOffset();
@@ -227,10 +226,25 @@ public class RecordUsageAnalyser {
             int ids = template.getChildName() == ZERO_CHILD_NODES ? 1 : 2;
             nodeSize += ids * RECORD_ID_BYTES;
             PropertyTemplate[] propertyTemplates = template.getPropertyTemplates();
-            for (PropertyTemplate propertyTemplate : propertyTemplates) {
-                nodeSize += RECORD_ID_BYTES;
-                RecordId propertyId = segment.readRecordId(offset + ids++ * RECORD_ID_BYTES);
-                analyseProperty(propertyId, propertyTemplate);
+            if (segment.getSegmentVersion().onOrAfter(V_11)) {
+                if (propertyTemplates.length > 0) {
+                    nodeSize += RECORD_ID_BYTES;
+                    RecordId id = segment.readRecordId(offset + ids * RECORD_ID_BYTES);
+                    ListRecord pIds = new ListRecord(id,
+                            propertyTemplates.length);
+                    for (int i = 0; i < propertyTemplates.length; i++) {
+                        RecordId propertyId = pIds.getEntry(i);
+                        analyseProperty(propertyId, propertyTemplates[i]);
+                    }
+                    analyseList(id, propertyTemplates.length);
+                }
+            } else {
+                for (PropertyTemplate propertyTemplate : propertyTemplates) {
+                    nodeSize += RECORD_ID_BYTES;
+                    RecordId propertyId = segment.readRecordId(offset + ids++
+                            * RECORD_ID_BYTES);
+                    analyseProperty(propertyId, propertyTemplate);
+                }
             }
         }
     }
@@ -238,6 +252,7 @@ public class RecordUsageAnalyser {
     @Override
     public String toString() {
         StringBuilder sb = new StringBuilder();
+        @SuppressWarnings("resource")
         Formatter formatter = new Formatter(sb);
         formatter.format(
                 "%s in maps (%s leaf and branch records)%n",
@@ -261,7 +276,7 @@ public class RecordUsageAnalyser {
     }
 
     private void analyseTemplate(RecordId templateId) {
-        if (notSeen(templateId)) {
+        if (seenIds.addIfNotPresent(templateId)) {
             templateCount++;
             Segment segment = templateId.getSegment();
             int size = 0;
@@ -278,35 +293,49 @@ public class RecordUsageAnalyser {
             if (hasPrimaryType) {
                 RecordId primaryId = segment.readRecordId(offset + size);
                 analyseString(primaryId);
-                size += Segment.RECORD_ID_BYTES;
+                size += RECORD_ID_BYTES;
             }
 
             if (hasMixinTypes) {
                 for (int i = 0; i < mixinCount; i++) {
                     RecordId mixinId = segment.readRecordId(offset + size);
                     analyseString(mixinId);
-                    size += Segment.RECORD_ID_BYTES;
+                    size += RECORD_ID_BYTES;
                 }
             }
 
             if (!zeroChildNodes && !manyChildNodes) {
                 RecordId childNameId = segment.readRecordId(offset + size);
                 analyseString(childNameId);
-                size += Segment.RECORD_ID_BYTES;
+                size += RECORD_ID_BYTES;
             }
 
-            for (int i = 0; i < propertyCount; i++) {
-                RecordId propertyNameId = segment.readRecordId(offset + size);
-                size += Segment.RECORD_ID_BYTES;
-                size++;  // type
-                analyseString(propertyNameId);
+            if (segment.getSegmentVersion().onOrAfter(V_11)) {
+                if (propertyCount > 0) {
+                    RecordId listId = segment.readRecordId(offset + size);
+                    size += RECORD_ID_BYTES;
+                    ListRecord propertyNames = new ListRecord(listId, propertyCount);
+                    for (int i = 0; i < propertyCount; i++) {
+                        RecordId propertyNameId = propertyNames.getEntry(i);
+                        size++; // type
+                        analyseString(propertyNameId);
+                    }
+                    analyseList(listId, propertyCount);
+                }
+            } else {
+                for (int i = 0; i < propertyCount; i++) {
+                    RecordId propertyNameId = segment.readRecordId(offset + size);
+                    size += RECORD_ID_BYTES;
+                    size++;  // type
+                    analyseString(propertyNameId);
+                }
             }
             templateSize += size;
         }
     }
 
     private void analyseMap(RecordId mapId, MapRecord map) {
-        if (notSeen(mapId)) {
+        if (seenIds.addIfNotPresent(mapId)) {
             mapCount++;
             if (map.isDiff()) {
                 analyseDiff(mapId, map);
@@ -352,14 +381,14 @@ public class RecordUsageAnalyser {
     }
 
     private void analyseProperty(RecordId propertyId, PropertyTemplate template) {
-        if (!contains(propertyId)) {
+        if (!seenIds.contains(propertyId)) {
             propertyCount++;
             Segment segment = propertyId.getSegment();
             int offset = propertyId.getOffset();
             Type<?> type = template.getType();
 
             if (type.isArray()) {
-                notSeen(propertyId);
+                seenIds.addIfNotPresent(propertyId);
                 int size = segment.readInt(offset);
                 valueSize += 4;
 
@@ -387,7 +416,7 @@ public class RecordUsageAnalyser {
     }
 
     private void analyseBlob(RecordId blobId) {
-        if (notSeen(blobId)) {
+        if (seenIds.addIfNotPresent(blobId)) {
             Segment segment = blobId.getSegment();
             int offset = blobId.getOffset();
             byte head = segment.readByte(offset);
@@ -421,7 +450,7 @@ public class RecordUsageAnalyser {
     }
 
     private void analyseString(RecordId stringId) {
-        if (notSeen(stringId)) {
+        if (seenIds.addIfNotPresent(stringId)) {
             Segment segment = stringId.getSegment();
             int offset = stringId.getOffset();
 
@@ -445,7 +474,7 @@ public class RecordUsageAnalyser {
     }
 
     private void analyseList(RecordId listId, int size) {
-        if (notSeen(listId)) {
+        if (seenIds.addIfNotPresent(listId)) {
             listCount++;
             listSize += noOfListSlots(size) * RECORD_ID_BYTES;
         }
@@ -461,60 +490,6 @@ public class RecordUsageAnalyser {
             } else {
                 return size + noOfListSlots(fullBuckets);
             }
-        }
-    }
-
-    private final Map<String, ShortSet> seenIds = newHashMap();
-
-    private boolean notSeen(RecordId id) {
-        String segmentId = id.getSegmentId().toString();
-        ShortSet offsets = seenIds.get(segmentId);
-        if (offsets == null) {
-            offsets = new ShortSet();
-            seenIds.put(segmentId, offsets);
-        }
-        return offsets.add(crop(id.getOffset()));
-    }
-
-    private boolean contains(RecordId id) {
-        String segmentId = id.getSegmentId().toString();
-        ShortSet offsets = seenIds.get(segmentId);
-        return offsets != null && offsets.contains(crop(id.getOffset()));
-    }
-
-    private static short crop(int value) {
-        return (short) (value >> Segment.RECORD_ALIGN_BITS);
-    }
-
-    static class ShortSet {
-        short[] elements;
-
-        boolean add(short n) {
-            if (elements == null) {
-                elements = new short[1];
-                elements[0] = n;
-                return true;
-            } else {
-                int k = binarySearch(elements, n);
-                if (k < 0) {
-                    int l = -k - 1;
-                    short[] e = new short[elements.length + 1];
-                    arraycopy(elements, 0, e, 0, l);
-                    e[l] = n;
-                    int c = elements.length - l;
-                    if (c > 0) {
-                        arraycopy(elements, l, e, l + 1, c);
-                    }
-                    elements = e;
-                    return true;
-                } else {
-                    return false;
-                }
-            }
-        }
-
-        boolean contains(short n) {
-            return elements != null && binarySearch(elements, n) >= 0;
         }
     }
 

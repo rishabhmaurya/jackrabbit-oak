@@ -17,11 +17,13 @@
 package org.apache.jackrabbit.oak.plugins.document;
 
 import java.util.List;
+import java.util.Map;
 
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 
 import org.apache.jackrabbit.oak.cache.CacheStats;
+import org.apache.jackrabbit.oak.plugins.document.cache.CacheInvalidationStats;
 
 /**
  * The interface for the backend storage for documents.
@@ -212,7 +214,8 @@ public interface DocumentStore {
     /**
      * Invalidate the document cache.
      */
-    void invalidateCache();
+    @CheckForNull
+    CacheInvalidationStats invalidateCache();
 
     /**
      * Invalidate the document cache for the given key.
@@ -251,4 +254,9 @@ public interface DocumentStore {
      */
     @CheckForNull
     CacheStats getCacheStats();
+
+    /**
+     * @return description of the underlying storage.
+     */
+    Map<String, String> getMetadata();
 }

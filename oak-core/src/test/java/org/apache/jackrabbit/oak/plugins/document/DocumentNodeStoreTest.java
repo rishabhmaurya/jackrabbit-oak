@@ -35,15 +35,19 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.SortedSet;
 import java.util.TreeSet;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.annotation.CheckForNull;
@@ -55,6 +59,7 @@ import com.google.common.collect.Sets;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Type;
+import org.apache.jackrabbit.oak.plugins.document.cache.CacheInvalidationStats;
 import org.apache.jackrabbit.oak.plugins.document.memory.MemoryDocumentStore;
 import org.apache.jackrabbit.oak.plugins.document.util.TimingDocumentStoreWrapper;
 import org.apache.jackrabbit.oak.plugins.document.util.Utils;
@@ -88,10 +93,11 @@ public class DocumentNodeStoreTest {
         DocumentStore docStore = new MemoryDocumentStore();
         DocumentStore testStore = new TimingDocumentStoreWrapper(docStore) {
             @Override
-            public void invalidateCache() {
+            public CacheInvalidationStats invalidateCache() {
                 super.invalidateCache();
                 semaphore.acquireUninterruptibly();
                 semaphore.release();
+                return null;
             }
         };
         final DocumentNodeStore store1 = new DocumentMK.Builder().setAsyncDelay(0)
@@ -609,16 +615,24 @@ public class DocumentNodeStoreTest {
         DocumentNodeStore ns2 = new DocumentMK.Builder().setAsyncDelay(0)
                 .setDocumentStore(docStore).getNodeStore();
 
+        ns1.updateClusterState();
+        ns2.updateClusterState();
+
         assertEquals(0, ns1.getInactiveClusterNodes().size());
         assertEquals(0, ns2.getInactiveClusterNodes().size());
+        assertEquals(2, ns1.getActiveClusterNodes().size());
+        assertEquals(2, ns2.getActiveClusterNodes().size());
 
         ns1.dispose();
 
         ns2.updateClusterState();
 
         Map<Integer, Long> inactive = ns2.getInactiveClusterNodes();
+        Map<Integer, Long> active = ns2.getActiveClusterNodes();
         assertEquals(1, inactive.size());
         assertEquals(1, (int) inactive.keySet().iterator().next());
+        assertEquals(1, active.size());
+        assertEquals(2, (int) active.keySet().iterator().next());
 
         ns2.dispose();
     }
@@ -1072,6 +1086,149 @@ public class DocumentNodeStoreTest {
         assertTrue("Existing children should be reported as such", existingChild.exists());
 
         store.dispose();
+    }
+
+    @Test
+    public void slowRebase() throws Exception {
+        final int NUM_NODES = DocumentRootBuilder.UPDATE_LIMIT / 2;
+        final int NUM_PROPS = 10;
+        final int REBASE_COUNT = 5;
+        final DocumentNodeStore ns = new DocumentMK.Builder().getNodeStore();
+
+        NodeBuilder builder = ns.getRoot().builder();
+        for (int i = 0; i < NUM_NODES / 2; i++) {
+            NodeBuilder c = deepTree(builder.child("n" + i), 5);
+            for (int j = 0; j < NUM_PROPS; j++) {
+                c.setProperty("p" + j, "value");
+            }
+        }
+
+        //1. Prepare a large tree
+        merge(ns, builder);
+
+        builder = ns.getRoot().builder();
+        int[] rebaseCounts = {2,3,1,8,3};
+        for (int r = 0; r < REBASE_COUNT; r++){
+            for (int i = 0; i < NUM_NODES / 2; i++) {
+                NodeBuilder c = deepTree(builder.child("n" + i), 5);
+                for (int j = 0; j < NUM_PROPS; j++) {
+                    c.setProperty("q"+ r + "" + j, "value");
+                }
+            }
+
+            //Do multiple rebase for each round of branch commit phase
+            for (int k = 0; k < rebaseCounts[r]; k++){
+                doSomeChange(ns);
+                ns.rebase(builder);
+            }
+        }
+
+        System.out.println("Starting the final merge "+ new Date());
+        merge(ns, builder);
+
+        ns.dispose();
+    }
+
+    // OAK-2642
+    @Test
+    public void dispose() throws CommitFailedException, InterruptedException {
+        final BlockingQueue<String> updates = new ArrayBlockingQueue<String>(1);
+        MemoryDocumentStore docStore = new MemoryDocumentStore() {
+            @Override
+            public <T extends Document> void update(Collection<T> collection,
+                                                    List<String> keys,
+                                                    UpdateOp updateOp) {
+                for (String k : keys) {
+                    try {
+                        updates.put(k);
+                    } catch (InterruptedException e) {
+                        throw new RuntimeException(e);
+                    }
+                }
+                super.update(collection, keys, updateOp);
+            }
+        };
+        final DocumentNodeStore store = new DocumentMK.Builder()
+                .setClusterId(1).setAsyncDelay(0)
+                .setDocumentStore(docStore).getNodeStore();
+        updates.clear();
+
+        NodeBuilder builder = store.getRoot().builder();
+        builder.child("test").child("node");
+        merge(store, builder);
+
+        builder = store.getRoot().builder();
+        builder.child("test").child("node").child("child-1");
+        merge(store, builder);
+
+        Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                store.dispose();
+            }
+        });
+        t.start();
+
+        String p = updates.take();
+        assertEquals("2:/test/node", p);
+        // background ops in dispose is still in progress
+        assertTrue(t.isAlive());
+        // wait until next update comes in
+        for (;;) {
+            if (updates.peek() != null) {
+                break;
+            }
+        }
+
+        // add child-2 while dispose is in progress
+        try {
+            builder = store.getRoot().builder();
+            builder.child("test").child("node").child("child-2");
+            merge(store, builder);
+            fail("Merge must fail with CommitFailedException");
+        } catch (CommitFailedException e) {
+            // expected
+        }
+
+        // drain updates until dispose finished
+        while (t.isAlive()) {
+            updates.poll(10, TimeUnit.MILLISECONDS);
+        }
+
+        // start new store with clusterId 2
+        DocumentNodeStore store2 = new DocumentMK.Builder()
+                .setClusterId(2).setAsyncDelay(0)
+                .setDocumentStore(docStore).getNodeStore();
+
+        // perform recovery if needed
+        LastRevRecoveryAgent agent = new LastRevRecoveryAgent(store2);
+        if (agent.isRecoveryNeeded()) {
+            agent.recover(1);
+        }
+
+        builder = store2.getRoot().builder();
+        NodeBuilder test = builder.getChildNode("test");
+        assertTrue(test.exists());
+        NodeBuilder node = test.getChildNode("node");
+        assertTrue(node.exists());
+        if (!node.hasChildNode("child-2")) {
+            node.child("child-2");
+            merge(store2, builder);
+        }
+    }
+
+    private void doSomeChange(NodeStore ns) throws CommitFailedException {
+        NodeBuilder b = ns.getRoot().builder();
+        b.setProperty("count", System.currentTimeMillis());
+        merge(ns, b);
+    }
+
+    private NodeBuilder deepTree(NodeBuilder parent, int depth){
+        NodeBuilder nb = parent;
+        for (int i = depth ; i >= 0; i--){
+            nb = nb.child("c"+i);
+        }
+        return nb;
     }
 
     private static void assertNoPreviousDocs(Set<String> ids) {

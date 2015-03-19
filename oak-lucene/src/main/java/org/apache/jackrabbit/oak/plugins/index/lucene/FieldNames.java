@@ -75,6 +75,18 @@ public final class FieldNames {
     public static final String FULLTEXT_RELATIVE_NODE = "fullnode:";
 
     /**
+     * Name of the field that contains those property names which are not found
+     * (or were null) for the given
+     */
+    public static final String NULL_PROPS = ":nullProps";
+
+    /**
+     * Name of the field that contains those property names which are exist i.e. not null
+     * for the given NodeState
+     */
+    public static final String NOT_NULL_PROPS = ":notNullProps";
+
+    /**
      * Used to select only the PATH field from the lucene documents
      */
     public static final Set<String> PATH_SELECTOR = new HashSet<String>(

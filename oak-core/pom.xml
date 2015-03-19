@@ -39,10 +39,6 @@
         <configuration>
           <instructions>
             <Embed-Dependency>
-              <!-- OAK-1708 TODO: temporary workaround for embedding code for DocumentNodeStoreService-->
-              commons-dbcp,commons-pool,h2
-              <!-- OAK-1708 TODO: note these below will only embedded when build with the respective profiles from oak-parent -->
-              postgresql,db2,db2-license,mysql-connector-java,ojdbc6
             </Embed-Dependency>
             <Embed-Transitive>true</Embed-Transitive>
             <Import-Package>
@@ -85,6 +81,7 @@
               org.apache.jackrabbit.oak.plugins.value,
               org.apache.jackrabbit.oak.plugins.version,
               org.apache.jackrabbit.oak.spi.commit,
+              org.apache.jackrabbit.oak.spi.gc,
               org.apache.jackrabbit.oak.spi.lifecycle,
               org.apache.jackrabbit.oak.spi.query,
               org.apache.jackrabbit.oak.spi.security,
@@ -212,7 +209,12 @@
       <artifactId>oak-blob</artifactId>
       <version>${project.version}</version>
     </dependency>
-
+    <dependency>
+      <groupId>org.apache.jackrabbit</groupId>
+      <artifactId>oak-blob-cloud</artifactId>
+      <version>${project.version}</version>
+      <optional>true</optional>
+    </dependency>
     <!-- General utility libraries -->
     <dependency>
       <groupId>com.google.guava</groupId>

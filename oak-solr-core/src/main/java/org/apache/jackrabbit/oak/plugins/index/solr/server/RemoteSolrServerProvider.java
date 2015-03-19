@@ -43,7 +43,8 @@ public class RemoteSolrServerProvider implements SolrServerProvider {
 
     private final RemoteSolrServerConfiguration remoteSolrServerConfiguration;
 
-    private SolrServer solrServer;
+    private SolrServer searchingSolrServer;
+    private SolrServer indexingSolrServer;
 
     public RemoteSolrServerProvider(RemoteSolrServerConfiguration remoteSolrServerConfiguration) {
         this.remoteSolrServerConfiguration = remoteSolrServerConfiguration;
@@ -52,7 +53,9 @@ public class RemoteSolrServerProvider implements SolrServerProvider {
     @CheckForNull
     @Override
     public SolrServer getSolrServer() throws Exception {
-        if (solrServer == null && remoteSolrServerConfiguration.getSolrZkHost() != null && remoteSolrServerConfiguration.getSolrZkHost().length() > 0) {
+
+        SolrServer solrServer = null;
+        if (remoteSolrServerConfiguration.getSolrZkHost() != null && remoteSolrServerConfiguration.getSolrZkHost().length() > 0) {
             try {
                 solrServer = initializeWithCloudSolrServer();
             } catch (Exception e) {
@@ -70,6 +73,7 @@ public class RemoteSolrServerProvider implements SolrServerProvider {
         if (solrServer == null) {
             throw new IOException("could not connect to any remote Solr server");
         }
+
         return solrServer;
     }
 
@@ -80,9 +84,8 @@ public class RemoteSolrServerProvider implements SolrServerProvider {
 
         if (server instanceof HttpSolrServer) {
             String url = ((HttpSolrServer) server).getBaseURL();
-            server = new ConcurrentUpdateSolrServer(url, 1000, 4);
+            server = new ConcurrentUpdateSolrServer(url, 1000, Runtime.getRuntime().availableProcessors());
         }
-
         return server;
     }
 
@@ -196,6 +199,20 @@ public class RemoteSolrServerProvider implements SolrServerProvider {
         } catch (Exception e) {
             log.warn("could not create collection {}", solrCollection);
             throw new SolrServerException(e);
+        }
+    }
+
+    @Override
+    public void close() throws IOException {
+        try {
+            searchingSolrServer.shutdown();
+        } catch (Exception e) {
+            // do nothing
+        }
+        try {
+            indexingSolrServer.shutdown();
+        } catch (Exception e) {
+            // do nothing
         }
     }
 }

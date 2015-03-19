@@ -33,6 +33,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import org.apache.commons.io.IOUtils;
 import org.apache.jackrabbit.JcrConstants;
 import org.apache.jackrabbit.oak.Oak;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
@@ -46,6 +47,7 @@ import org.apache.jackrabbit.oak.plugins.index.nodetype.NodeTypeIndexProvider;
 import org.apache.jackrabbit.oak.plugins.index.property.PropertyIndexEditorProvider;
 import org.apache.jackrabbit.oak.plugins.memory.PropertyStates;
 import org.apache.jackrabbit.oak.plugins.nodetype.write.InitialContent;
+import org.apache.jackrabbit.oak.plugins.nodetype.write.NodeTypeRegistry;
 import org.apache.jackrabbit.oak.query.AbstractQueryTest;
 import org.apache.jackrabbit.oak.spi.commit.Observer;
 import org.apache.jackrabbit.oak.spi.query.QueryIndexProvider;
@@ -73,6 +75,7 @@ import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexEditorTe
 import static org.apache.jackrabbit.oak.plugins.index.lucene.TestUtil.useV2;
 import static org.apache.jackrabbit.oak.plugins.index.property.OrderedIndex.OrderDirection;
 import static org.apache.jackrabbit.oak.plugins.memory.PropertyStates.createProperty;
+import static org.hamcrest.CoreMatchers.not;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThat;
 import static org.junit.matchers.JUnitMatchers.containsString;
@@ -296,8 +299,9 @@ public class LucenePropertyIndexTest extends AbstractQueryTest {
         assertQuery(propabQuery, asList("/test/a", "/test/b", "/test"));
     }
 
-    private static void setNodeType(Tree t, String typeName){
+    private static Tree setNodeType(Tree t, String typeName){
         t.setProperty(JcrConstants.JCR_PRIMARYTYPE, typeName, Type.NAME);
+        return t;
     }
 
     @Test
@@ -327,6 +331,127 @@ public class LucenePropertyIndexTest extends AbstractQueryTest {
         root.commit();
 
         assertQuery("select [jcr:path] from [nt:base] where propa is not null", asList("/test/a", "/test/b"));
+    }
+
+    //OAK-2568
+    @Test
+    public void multiValueAnd() throws Exception{
+        Tree idx = createIndex("test1", of("tags"));
+        root.commit();
+
+        Tree test = root.getTree("/").addChild("test");
+        test.addChild("a").setProperty("tags", of("a","b"), Type.STRINGS);
+        test.addChild("b").setProperty("tags", of("a","c"), Type.STRINGS);
+        root.commit();
+
+        String q = "SELECT * FROM [nt:unstructured] as content WHERE ISDESCENDANTNODE('/content/dam/en/us')\n" +
+                "and(\n" +
+                "    content.[tags] = 'Products:A'\n" +
+                "    or content.[tags] = 'Products:A/B'\n" +
+                "    or content.[tags] = 'Products:A/B'\n" +
+                "    or content.[tags] = 'Products:A'\n" +
+                ")\n" +
+                "and(\n" +
+                "    content.[tags] = 'DocTypes:A'\n" +
+                "    or content.[tags] = 'DocTypes:B'\n" +
+                "    or content.[tags] = 'DocTypes:C'\n" +
+                "    or content.[tags] = 'ProblemType:A'\n" +
+                ")\n" +
+                "and(\n" +
+                "    content.[hasRendition] IS NULL\n" +
+                "    or content.[hasRendition] = 'false'\n" +
+                ")";
+        String explain = explain(q);
+        System.out.println(explain);
+        String luceneQuery = explain.substring(0, explain.indexOf('\n'));
+        assertEquals("[nt:unstructured] as [content] /* lucene:test1(/oak:index/test1) " + 
+                "+(tags:Products:A tags:Products:A/B) " + 
+                "+(tags:DocTypes:A tags:DocTypes:B tags:DocTypes:C tags:ProblemType:A)",
+                luceneQuery);
+    }
+
+    @Test
+    public void redundantNotNullCheck() throws Exception{
+        Tree idx = createIndex("test1", of("tags"));
+        root.commit();
+
+        Tree test = root.getTree("/").addChild("test");
+        test.addChild("a").setProperty("tags", of("a","b"), Type.STRINGS);
+        test.addChild("b").setProperty("tags", of("a","c"), Type.STRINGS);
+        root.commit();
+
+        String q = "SELECT * FROM [nt:unstructured] as content WHERE ISDESCENDANTNODE('/content/dam/en/us')\n" +
+                "and(\n" +
+                "    content.[tags] = 'Products:A'\n" +
+                "    or content.[tags] = 'Products:A/B'\n" +
+                "    or content.[tags] = 'Products:A/B'\n" +
+                "    or content.[tags] = 'Products:A'\n" +
+                ")\n" +
+                "and(\n" +
+                "    content.[tags] = 'DocTypes:A'\n" +
+                "    or content.[tags] = 'DocTypes:B'\n" +
+                "    or content.[tags] = 'DocTypes:C'\n" +
+                "    or content.[tags] = 'ProblemType:A'\n" +
+                ")\n" +
+                "and(\n" +
+                "    content.[hasRendition] IS NULL\n" +
+                "    or content.[hasRendition] = 'false'\n" +
+                ")";
+
+        //Check that filter created out of query does not have is not null restriction
+        assertThat(explain(q), not(containsString("[content].[tags] is not null")));
+    }
+
+    @Test
+    public void propertyExistenceQuery2() throws Exception {
+        NodeTypeRegistry.register(root, IOUtils.toInputStream(TestUtil.TEST_NODE_TYPE), "test nodeType");
+
+        Tree idx = createIndex("test1", of("propa", "propb"));
+        Tree props = TestUtil.newRulePropTree(idx, TestUtil.NT_TEST);
+        Tree prop = props.addChild(TestUtil.unique("prop"));
+        prop.setProperty(LuceneIndexConstants.PROP_NAME, "propa");
+        prop.setProperty(LuceneIndexConstants.PROP_PROPERTY_INDEX, true);
+        prop.setProperty(LuceneIndexConstants.PROP_NOT_NULL_CHECK_ENABLED, true);
+        root.commit();
+
+        Tree test = root.getTree("/").addChild("test");
+        createNodeWithType(test, "a", "oak:TestNode").setProperty("propa", "a");
+        createNodeWithType(test, "b", "oak:TestNode").setProperty("propa", "c");
+        createNodeWithType(test, "c", "oak:TestNode").setProperty("propb", "e");
+        root.commit();
+
+        String propabQuery = "select [jcr:path] from [oak:TestNode] where [propa] is not null";
+        assertThat(explain(propabQuery), containsString("lucene:test1(/oak:index/test1) :notNullProps:propa"));
+        assertQuery(propabQuery, asList("/test/a", "/test/b"));
+    }
+
+    @Test
+    public void propertyNonExistenceQuery() throws Exception {
+        NodeTypeRegistry.register(root, IOUtils.toInputStream(TestUtil.TEST_NODE_TYPE), "test nodeType");
+
+        Tree idx = createIndex("test1", of("propa", "propb"));
+        Tree props = TestUtil.newRulePropTree(idx, TestUtil.NT_TEST);
+        Tree prop = props.addChild(TestUtil.unique("prop"));
+        prop.setProperty(LuceneIndexConstants.PROP_NAME, "propa");
+        prop.setProperty(LuceneIndexConstants.PROP_PROPERTY_INDEX, true);
+        prop.setProperty(LuceneIndexConstants.PROP_NULL_CHECK_ENABLED, true);
+        root.commit();
+
+        Tree test = root.getTree("/").addChild("test");
+        createNodeWithType(test, "a", "oak:TestNode").setProperty("propa", "a");
+        createNodeWithType(test, "b", "oak:TestNode").setProperty("propa", "c");
+        createNodeWithType(test, "c", "oak:TestNode").setProperty("propb", "e");
+        root.commit();
+
+        String propabQuery = "select [jcr:path] from [oak:TestNode] where [propa] is null";
+        assertThat(explain(propabQuery), containsString("lucene:test1(/oak:index/test1) :nullProps:propa"));
+        assertQuery(propabQuery, asList("/test/c"));
+    }
+
+    private static Tree createNodeWithType(Tree t, String nodeName, String typeName){
+        t = t.addChild(nodeName);
+        t.setProperty(JcrConstants.JCR_PRIMARYTYPE, typeName, Type.NAME);
+        return t;
     }
     
     @Test
@@ -781,9 +906,9 @@ public class LucenePropertyIndexTest extends AbstractQueryTest {
                 getSortedPaths(tuples, OrderDirection.ASC))));
         // Append the path of property added as timestamp string to the sorted list
         assertOrderedQuery(
-            "select [jcr:path] from [nt:base] where [bar] = 'baz' order by [foo] DESC", Lists
-            .newArrayList(Iterables.concat(getSortedPaths(tuples, OrderDirection.DESC),
-                    Lists.newArrayList("/test/n0"))));
+                "select [jcr:path] from [nt:base] where [bar] = 'baz' order by [foo] DESC", Lists
+                        .newArrayList(Iterables.concat(getSortedPaths(tuples, OrderDirection.DESC),
+                                Lists.newArrayList("/test/n0"))));
     }
 
     @Test
@@ -1076,10 +1201,44 @@ public class LucenePropertyIndexTest extends AbstractQueryTest {
         assertQuery("select * from [nt:base] where CONTAINS(*, 'red')", asList("/test/text/jcr:content"));
     }
 
-    private void createFileNode(Tree tree, String name, String content, String mimeType){
+    @Test
+    public void binaryNotIndexedWhenMimeTypeNull() throws Exception{
+        Tree idx = createFulltextIndex(root.getTree("/"), "test");
+        TestUtil.useV2(idx);
+
+        Tree test = root.getTree("/").addChild("test");
+        String path = createFileNode(test, "text", "red brown fox was jumping", "text/plain").getPath();
+        root.commit();
+
+        assertQuery("select * from [nt:base] where CONTAINS(*, 'jumping')", asList("/test/text/jcr:content"));
+
+        //Remove the mimeType property. Then binary would not be indexed and result would be empty
+        root.getTree(path).removeProperty(JcrConstants.JCR_MIMETYPE);
+        root.commit();
+        assertQuery("select * from [nt:base] where CONTAINS(*, 'jumping')", Collections.<String>emptyList());
+    }
+
+    @Test
+    public void binaryNotIndexedWhenNotSupportedMimeType() throws Exception{
+        Tree idx = createFulltextIndex(root.getTree("/"), "test");
+        TestUtil.useV2(idx);
+
+        Tree test = root.getTree("/").addChild("test");
+        String path = createFileNode(test, "text", "red brown fox was jumping", "text/plain").getPath();
+        root.commit();
+
+        assertQuery("select * from [nt:base] where CONTAINS(*, 'jumping')", asList("/test/text/jcr:content"));
+
+        root.getTree(path).setProperty(JcrConstants.JCR_MIMETYPE, "foo/bar");
+        root.commit();
+        assertQuery("select * from [nt:base] where CONTAINS(*, 'jumping')", Collections.<String>emptyList());
+    }
+
+    private Tree createFileNode(Tree tree, String name, String content, String mimeType){
         Tree jcrContent = tree.addChild(name).addChild(JCR_CONTENT);
         jcrContent.setProperty(JcrConstants.JCR_DATA, content.getBytes());
         jcrContent.setProperty(JcrConstants.JCR_MIMETYPE, mimeType);
+        return jcrContent;
     }
 
     private Tree usc(Tree parent, String childName){

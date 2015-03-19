@@ -718,6 +718,17 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
     private static Query createQuery(PropertyRestriction pr,
                                      PropertyDefinition defn) {
         int propType = determinePropertyType(defn, pr);
+
+        if (pr.isNullRestriction()){
+            return new TermQuery(new Term(FieldNames.NULL_PROPS, defn.name));
+        }
+
+        //If notNullCheckEnabled explicitly enabled use the simple TermQuery
+        //otherwise later fallback to range query
+        if (pr.isNotNullRestriction() && defn.notNullCheckEnabled){
+            return new TermQuery(new Term(FieldNames.NOT_NULL_PROPS, defn.name));
+        }
+
         switch (propType) {
             case PropertyType.DATE: {
                 Long first = pr.first != null ? FieldFactory.dateToLong(pr.first.getValue(Type.DATE)) : null;
@@ -742,7 +753,7 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
                         in.add(NumericRangeQuery.newLongRange(pr.propertyName, dateVal, dateVal, true, true), BooleanClause.Occur.SHOULD);
                     }
                     return in;
-                } else if (pr.first == null && pr.last == null ) {
+                } else if (pr.isNotNullRestriction()) {
                     // not null. For date lower bound of zero can be used
                     return NumericRangeQuery.newLongRange(pr.propertyName, 0L, Long.MAX_VALUE, true, true);
                 }
@@ -772,7 +783,7 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
                         in.add(NumericRangeQuery.newDoubleRange(pr.propertyName, doubleVal, doubleVal, true, true), BooleanClause.Occur.SHOULD);
                     }
                     return in;
-                } else if (pr.first == null && pr.last == null ) {
+                } else if (pr.isNotNullRestriction()) {
                     // not null.
                     return NumericRangeQuery.newDoubleRange(pr.propertyName, Double.MIN_VALUE, Double.MAX_VALUE, true, true);
                 }
@@ -801,7 +812,7 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
                         in.add(NumericRangeQuery.newLongRange(pr.propertyName, longVal, longVal, true, true), BooleanClause.Occur.SHOULD);
                     }
                     return in;
-                } else if (pr.first == null && pr.last == null ) {
+                } else if (pr.isNotNullRestriction()) {
                     // not null.
                     return NumericRangeQuery.newLongRange(pr.propertyName, Long.MIN_VALUE, Long.MAX_VALUE, true, true);
                 }
@@ -835,7 +846,7 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
                         in.add(new TermQuery(new Term(pr.propertyName, strVal)), BooleanClause.Occur.SHOULD);
                     }
                     return in;
-                } else if (pr.first == null && pr.last == null ) {
+                } else if (pr.isNotNullRestriction()) {
                     return new TermRangeQuery(pr.propertyName, null, null, true, true);
                 }
             }

@@ -14,9 +14,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.jackrabbit.oak.plugins.index.solr.configuration;
+package org.apache.jackrabbit.oak.plugins.index.solr.configuration.nodestate;
 
-import org.apache.jackrabbit.oak.plugins.index.solr.server.SolrServerProvider;
 import org.apache.jackrabbit.oak.plugins.segment.SegmentNodeStore;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.EmptyHook;
@@ -26,11 +25,11 @@ import org.apache.jackrabbit.oak.spi.state.NodeStore;
 import org.junit.Before;
 import org.junit.Test;
 
-import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.fail;
 
 /**
- * Tests for {@link org.apache.jackrabbit.oak.plugins.index.solr.configuration.OakSolrNodeStateConfiguration}
+ * Tests for {@link org.apache.jackrabbit.oak.plugins.index.solr.configuration.nodestate.OakSolrNodeStateConfiguration}
  */
 public class OakSolrNodeStateConfigurationTest {
 
@@ -49,9 +48,8 @@ public class OakSolrNodeStateConfigurationTest {
         builder.setChildNode("z");
 
         builder.setChildNode("oak:index").setChildNode("solrIdx")
-               .setProperty("coreName", "cn")
-               .setProperty("solrHomePath", "sh")
-               .setProperty("solrConfigPath", "sc");
+               .setProperty("type", "solr")
+               .setProperty("rows", "100");
 
         store.merge(builder, EmptyHook.INSTANCE, CommitInfo.EMPTY);
     }
@@ -59,26 +57,28 @@ public class OakSolrNodeStateConfigurationTest {
     @Test
     public void testExistingPath() throws Exception {
         NodeState idxDef = store.getRoot().getChildNode("oak:index").getChildNode("solrIdx");
-        OakSolrNodeStateConfiguration fixedNodeStateConfiguration = new OakSolrNodeStateConfiguration(idxDef);
-        SolrServerConfiguration<SolrServerProvider> configuration = fixedNodeStateConfiguration.getSolrServerConfiguration();
-        assertNotNull(configuration);
-//        assertEquals("sh", configuration.getSolrHomePath()); // property defined in the node state
-//        assertEquals("cn", solrServerConfiguration.getCoreName()); // property defined in the node state
-//        assertEquals("path_exact", fixedNodeStateConfiguration.getPathField()); // using default as this property is not defined in the node state
+        OakSolrNodeStateConfiguration nodeStateConfiguration = new OakSolrNodeStateConfiguration(idxDef);
+        assertNotNull(nodeStateConfiguration.getCatchAllField());
     }
 
     @Test
     public void testNonExistingPath() throws Exception {
         NodeState idxDef = store.getRoot().getChildNode("oak:index").getChildNode("a");
-        OakSolrNodeStateConfiguration fixedNodeStateConfiguration = new OakSolrNodeStateConfiguration(idxDef);
-        assertNotNull(fixedNodeStateConfiguration.getSolrServerConfiguration());
+        try {
+            new OakSolrNodeStateConfiguration(idxDef);
+        } catch (IllegalArgumentException e) {
+            // expected to fail as the NodeState doesn't exist
+        }
     }
 
     @Test
     public void testWrongNodeState() throws Exception {
-        NodeState idxDef = store.getRoot().getChildNode("a");
-        OakSolrNodeStateConfiguration fixedNodeStateConfiguration = new OakSolrNodeStateConfiguration(idxDef);
-        assertFalse(fixedNodeStateConfiguration.getConfigurationNodeState().exists());
-        assertNotNull(fixedNodeStateConfiguration.getSolrServerConfiguration()); // defaults are used
+        NodeState idxDef = store.getRoot().getChildNode("x");
+        try {
+            new OakSolrNodeStateConfiguration(idxDef);
+            fail();
+        } catch (IllegalArgumentException e) {
+            // expected to fail as the NodeState is not a solr node
+        }
     }
 }

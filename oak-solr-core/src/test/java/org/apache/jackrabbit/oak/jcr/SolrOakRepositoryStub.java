@@ -17,6 +17,7 @@
 package org.apache.jackrabbit.oak.jcr;
 
 import java.io.File;
+import java.io.IOException;
 import java.util.Properties;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
@@ -28,6 +29,7 @@ import org.apache.jackrabbit.oak.plugins.index.solr.configuration.DefaultSolrCon
 import org.apache.jackrabbit.oak.plugins.index.solr.configuration.EmbeddedSolrServerConfiguration;
 import org.apache.jackrabbit.oak.plugins.index.solr.configuration.OakSolrConfiguration;
 import org.apache.jackrabbit.oak.plugins.index.solr.configuration.OakSolrConfigurationProvider;
+import org.apache.jackrabbit.oak.plugins.index.solr.configuration.nodestate.NodeStateSolrServersObserver;
 import org.apache.jackrabbit.oak.plugins.index.solr.index.SolrIndexEditorProvider;
 import org.apache.jackrabbit.oak.plugins.index.solr.query.SolrQueryIndexProvider;
 import org.apache.jackrabbit.oak.plugins.index.solr.server.EmbeddedSolrServerProvider;
@@ -53,6 +55,11 @@ public class SolrOakRepositoryStub extends OakTarMKRepositoryStub {
             throw new RuntimeException();
         }
         SolrServerProvider solrServerProvider = new SolrServerProvider() {
+            @Override
+            public void close() throws IOException {
+
+            }
+
             @CheckForNull
             @Override
             public SolrServer getSolrServer() throws Exception {
@@ -86,6 +93,7 @@ public class SolrOakRepositoryStub extends OakTarMKRepositoryStub {
         OakSolrConfigurationProvider oakSolrConfigurationProvider = new DefaultSolrConfigurationProvider(configuration);
         jcr.with(new SolrIndexInitializer(false))
                 .with(AggregateIndexProvider.wrap(new SolrQueryIndexProvider(solrServerProvider, oakSolrConfigurationProvider)))
+                .with(new NodeStateSolrServersObserver())
                 .with(new SolrIndexEditorProvider(solrServerProvider, oakSolrConfigurationProvider));
     }
 }

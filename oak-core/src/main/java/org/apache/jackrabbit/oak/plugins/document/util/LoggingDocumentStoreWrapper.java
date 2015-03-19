@@ -17,6 +17,7 @@
 package org.apache.jackrabbit.oak.plugins.document.util;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Callable;
 
 import javax.annotation.Nonnull;
@@ -28,6 +29,7 @@ import org.apache.jackrabbit.oak.plugins.document.Document;
 import org.apache.jackrabbit.oak.plugins.document.DocumentStore;
 import org.apache.jackrabbit.oak.plugins.document.DocumentStoreException;
 import org.apache.jackrabbit.oak.plugins.document.UpdateOp;
+import org.apache.jackrabbit.oak.plugins.document.cache.CacheInvalidationStats;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -220,10 +222,10 @@ public class LoggingDocumentStoreWrapper implements DocumentStore {
     }
 
     @Override
-    public void invalidateCache() {
+    public CacheInvalidationStats invalidateCache() {
         try {
             logMethod("invalidateCache");
-            store.invalidateCache();
+            return store.invalidateCache();
         } catch (Exception e) {
             logException(e);
             throw convert(e);
@@ -294,6 +296,11 @@ public class LoggingDocumentStoreWrapper implements DocumentStore {
             logException(e);
             throw convert(e);
         }
+    }
+
+    @Override
+    public Map<String, String> getMetadata() {
+        return store.getMetadata();
     }
 
     private void logMethod(String methodName, Object... args) {
