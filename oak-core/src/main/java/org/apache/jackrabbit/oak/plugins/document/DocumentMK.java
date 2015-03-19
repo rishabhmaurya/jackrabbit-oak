@@ -32,29 +32,34 @@ import com.mongodb.DB;
 
 import org.apache.jackrabbit.mk.api.MicroKernel;
 import org.apache.jackrabbit.mk.api.MicroKernelException;
-import org.apache.jackrabbit.oak.spi.blob.BlobStore;
-import org.apache.jackrabbit.oak.spi.blob.GarbageCollectableBlobStore;
-import org.apache.jackrabbit.oak.spi.blob.MemoryBlobStore;
-import org.apache.jackrabbit.oak.commons.json.JsopReader;
-import org.apache.jackrabbit.oak.commons.json.JsopStream;
-import org.apache.jackrabbit.oak.commons.json.JsopTokenizer;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.cache.CacheLIRS;
 import org.apache.jackrabbit.oak.cache.CacheValue;
 import org.apache.jackrabbit.oak.cache.EmpiricalWeigher;
 import org.apache.jackrabbit.oak.commons.PathUtils;
+import org.apache.jackrabbit.oak.commons.json.JsopReader;
+import org.apache.jackrabbit.oak.commons.json.JsopStream;
+import org.apache.jackrabbit.oak.commons.json.JsopTokenizer;
 import org.apache.jackrabbit.oak.plugins.document.DocumentNodeState.Children;
-import org.apache.jackrabbit.oak.plugins.document.mongo.MongoBlobStore;
 import org.apache.jackrabbit.oak.plugins.document.memory.MemoryDocumentStore;
+import org.apache.jackrabbit.oak.plugins.document.mongo.MongoBlobStore;
+import org.apache.jackrabbit.oak.plugins.document.mongo.MongoDiffCache;
 import org.apache.jackrabbit.oak.plugins.document.mongo.MongoDocumentStore;
+import org.apache.jackrabbit.oak.plugins.document.mongo.MongoVersionGCSupport;
 import org.apache.jackrabbit.oak.plugins.document.persistentCache.CacheType;
 import org.apache.jackrabbit.oak.plugins.document.persistentCache.PersistentCache;
 import org.apache.jackrabbit.oak.plugins.document.rdb.RDBBlobStore;
 import org.apache.jackrabbit.oak.plugins.document.rdb.RDBDocumentStore;
+import org.apache.jackrabbit.oak.plugins.document.rdb.RDBOptions;
 import org.apache.jackrabbit.oak.plugins.document.util.StringValue;
+import org.apache.jackrabbit.oak.spi.blob.BlobStore;
+import org.apache.jackrabbit.oak.spi.blob.GarbageCollectableBlobStore;
+import org.apache.jackrabbit.oak.spi.blob.MemoryBlobStore;
 import org.apache.jackrabbit.oak.stats.Clock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import static com.google.common.base.Preconditions.checkArgument;
 
 /**
  * A MicroKernel implementation that stores the data in a {@link DocumentStore}.
@@ -268,7 +273,7 @@ public class DocumentMK implements MicroKernel {
         boolean success = false;
         boolean isBranch = false;
         Revision rev;
-        Commit commit = nodeStore.newCommit(baseRevId != null ? Revision.fromString(baseRevId) : null);
+        Commit commit = nodeStore.newCommit(baseRevId != null ? Revision.fromString(baseRevId) : null, null);
         try {
             Revision baseRev = commit.getBaseRevision();
             isBranch = baseRev != null && baseRev.isBranch();
@@ -339,7 +344,7 @@ public class DocumentMK implements MicroKernel {
             throw new MicroKernelException("Not a branch revision: " + ancestorRevisionId);
         }
         try {
-            return nodeStore.reset(branch, ancestor).toString();
+            return nodeStore.reset(branch, ancestor, null).toString();
         } catch (DocumentStoreException e) {
             throw new MicroKernelException(e);
         }
@@ -487,6 +492,10 @@ public class DocumentMK implements MicroKernel {
      */
     public static class Builder {
         private static final long DEFAULT_MEMORY_CACHE_SIZE = 256 * 1024 * 1024;
+        public static final int DEFAULT_NODE_CACHE_PERCENTAGE = 25;
+        public static final int DEFAULT_CHILDREN_CACHE_PERCENTAGE = 10;
+        public static final int DEFAULT_DIFF_CACHE_PERCENTAGE = 5;
+        public static final int DEFAULT_DOC_CHILDREN_CACHE_PERCENTAGE = 3;
         private DocumentNodeStore nodeStore;
         private DocumentStore documentStore;
         private DiffCache diffCache;
@@ -496,11 +505,11 @@ public class DocumentMK implements MicroKernel {
         private boolean timing;
         private boolean logging;
         private Weigher<CacheValue, CacheValue> weigher = new EmpiricalWeigher();
-        private long nodeCacheSize;
-        private long childrenCacheSize;
-        private long diffCacheSize;
-        private long documentCacheSize;
-        private long docChildrenCacheSize;
+        private long memoryCacheSize = DEFAULT_MEMORY_CACHE_SIZE;
+        private int nodeCachePercentage = DEFAULT_NODE_CACHE_PERCENTAGE;
+        private int childrenCachePercentage = DEFAULT_CHILDREN_CACHE_PERCENTAGE;
+        private int diffCachePercentage = DEFAULT_DIFF_CACHE_PERCENTAGE;
+        private int docChildrenCachePercentage = DEFAULT_DOC_CHILDREN_CACHE_PERCENTAGE;
         private boolean useSimpleRevision;
         private long splitDocumentAgeMillis = 5 * 60 * 1000;
         private long offHeapCacheSize = -1;
@@ -512,7 +521,6 @@ public class DocumentMK implements MicroKernel {
         private PersistentCache persistentCache;
 
         public Builder() {
-            memoryCacheSize(DEFAULT_MEMORY_CACHE_SIZE);
         }
 
         /**
@@ -568,7 +576,21 @@ public class DocumentMK implements MicroKernel {
             }
             return this;
         }
-        
+
+        /**
+         * Sets a {@link DataSource} to use for the RDB document and blob
+         * stores, including {@link RDBOptions}.
+         *
+         * @return this
+         */
+        public Builder setRDBConnection(DataSource ds, RDBOptions options) {
+            this.documentStore = new RDBDocumentStore(ds, this, options);
+            if(this.blobStore == null) {
+                this.blobStore = new RDBBlobStore(ds, options);
+            }
+            return this;
+        }
+
         /**
          * Sets the persistent cache option.
          *
@@ -712,32 +734,46 @@ public class DocumentMK implements MicroKernel {
         }
 
         public Builder memoryCacheSize(long memoryCacheSize) {
-            this.nodeCacheSize = memoryCacheSize * 25 / 100;
-            this.childrenCacheSize = memoryCacheSize * 10 / 100;
-            this.diffCacheSize = memoryCacheSize * 5 / 100;
-            this.docChildrenCacheSize = memoryCacheSize * 3 / 100;
-            this.documentCacheSize = memoryCacheSize - nodeCacheSize - childrenCacheSize - diffCacheSize - docChildrenCacheSize;
+            this.memoryCacheSize = memoryCacheSize;
+            return this;
+        }
+        
+        public Builder memoryCacheDistribution(int nodeCachePercentage,
+                                               int childrenCachePercentage,
+                                               int docChildrenCachePercentage,
+                                               int diffCachePercentage) {
+            checkArgument(nodeCachePercentage >= 0);
+            checkArgument(childrenCachePercentage>= 0);
+            checkArgument(docChildrenCachePercentage >= 0);
+            checkArgument(diffCachePercentage >= 0);
+            checkArgument(nodeCachePercentage + childrenCachePercentage + 
+                    docChildrenCachePercentage + diffCachePercentage < 100);
+            this.nodeCachePercentage = nodeCachePercentage;
+            this.childrenCachePercentage = childrenCachePercentage;
+            this.docChildrenCachePercentage = docChildrenCachePercentage;
+            this.diffCachePercentage = diffCachePercentage;
             return this;
         }
 
         public long getNodeCacheSize() {
-            return nodeCacheSize;
+            return memoryCacheSize * nodeCachePercentage / 100;
         }
 
         public long getChildrenCacheSize() {
-            return childrenCacheSize;
+            return memoryCacheSize * childrenCachePercentage / 100;
         }
 
         public long getDocumentCacheSize() {
-            return documentCacheSize;
+            return memoryCacheSize - getNodeCacheSize() - getChildrenCacheSize() 
+                    - getDiffCacheSize() - getDocChildrenCacheSize();
         }
 
         public long getDocChildrenCacheSize() {
-            return docChildrenCacheSize;
+            return memoryCacheSize * docChildrenCachePercentage / 100;
         }
 
         public long getDiffCacheSize() {
-            return diffCacheSize;
+            return memoryCacheSize * diffCachePercentage / 100;
         }
 
         public Builder setUseSimpleRevision(boolean useSimpleRevision) {
@@ -808,6 +844,15 @@ public class DocumentMK implements MicroKernel {
 
         public boolean isDisableBranches() {
             return disableBranches;
+        }
+
+        VersionGCSupport createVersionGCSupport() {
+            DocumentStore store = getDocumentStore();
+            if (store instanceof MongoDocumentStore) {
+                return new MongoVersionGCSupport((MongoDocumentStore) store);
+            } else {
+                return new VersionGCSupport(store);
+            }
         }
 
         /**

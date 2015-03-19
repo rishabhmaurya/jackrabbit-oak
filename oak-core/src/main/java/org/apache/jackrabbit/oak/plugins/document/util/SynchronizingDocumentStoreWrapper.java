@@ -17,13 +17,16 @@
 package org.apache.jackrabbit.oak.plugins.document.util;
 
 import java.util.List;
+import java.util.Map;
 
 import javax.annotation.Nonnull;
 
+import org.apache.jackrabbit.oak.cache.CacheStats;
 import org.apache.jackrabbit.oak.plugins.document.Collection;
 import org.apache.jackrabbit.oak.plugins.document.Document;
 import org.apache.jackrabbit.oak.plugins.document.DocumentStore;
 import org.apache.jackrabbit.oak.plugins.document.UpdateOp;
+import org.apache.jackrabbit.oak.plugins.document.cache.CacheInvalidationStats;
 
 /**
  * Implements a <code>DocumentStore</code> wrapper which synchronizes on all
@@ -96,8 +99,8 @@ public class SynchronizingDocumentStoreWrapper implements DocumentStore {
     }
 
     @Override
-    public synchronized void invalidateCache() {
-        store.invalidateCache();
+    public synchronized CacheInvalidationStats invalidateCache() {
+        return store.invalidateCache();
     }
 
     @Override
@@ -120,4 +123,13 @@ public class SynchronizingDocumentStoreWrapper implements DocumentStore {
         store.setReadWriteMode(readWriteMode);
     }
 
+    @Override
+    public synchronized CacheStats getCacheStats() {
+        return store.getCacheStats();
+    }
+
+    @Override
+    public Map<String, String> getMetadata() {
+        return store.getMetadata();
+    }
 }

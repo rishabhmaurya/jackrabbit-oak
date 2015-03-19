@@ -89,12 +89,14 @@ Below is the canonical index definition structure
       - type (string) = 'lucene' mandatory
       - async (string) = 'async' mandatory
       - blobSize (long) = 32768
+      - maxFieldLength (long) = 10000
       - evaluatePathRestrictions (boolean) = false
       - name (string)
-      - compatMode (long) = 2
+      - compatVersion (long) = 2
       + indexRules (nt:unstructured)
       + aggregates (nt:unstructured)
       + analyzers (nt:unstructured)
+      + tika (nt:unstructured)
 
 Following are the config options which can be defined at the index definition
 level
@@ -125,6 +127,9 @@ compatMode
 : By default Oak uses older Lucene index implementation which does not
   supports property restrictions, index time aggregation etc. To make use of
   this feature set it to 2
+
+[maxFieldLength][OAK-2469]
+: Numbers of terms indexed per field. Defaults to 10000
 
 #### Indexing Rules
 
@@ -206,6 +211,8 @@ structure
       - ordered (boolean) = false
       - isRegexp (boolean) = false
       - type (string) = 'undefined'
+      - propertyIndex (boolean) = false
+      - nullCheckEnabled (boolean) = false
 
 Following are the details about the above mentioned config options which can be
 defined at the property definition level
@@ -266,6 +273,23 @@ type
   inferred from the indexed value. However in some cases where same property
   type is not used consistently across various nodes then it would recommened
    to specify the type explicitly.
+   
+propertyIndex
+: Whether the index for this property is used for equality conditions, ordering, 
+  and is not null conditions.
+
+nullCheckEnabled
+: Since 1.0.12
+: If the property is checked for _is null_ then this should be set to true. This
+  should only be enabled for nodeTypes which are not generic as it leads to index
+  entry for all nodes of that type where this property is not set.
+    * _//element(*, app:Asset)[not(jcr:content/@excludeFromSearch)]
+
+  It would be better to use a query which checks for property existence or property
+  being set to specific values as such queries can make use of index without any
+  extra storage cost.
+
+  Refer to [IS NULL support][OAK-2517] for more details
 
 **Property Names**
 
@@ -402,7 +426,10 @@ defaults to 5
             - path = "renditions/original"
             - relativeNode = true
 
-#### Analyzers (1.0.10)
+#### Analyzers (1.1.6)
+
+_This feature is currently not part of 1.0 branch and is only present in unstable
+1.x releases_
 
 Analyzers can be configured as part of index definition via `analyzers` node.
 The default analyzer can be configured via `analyzers/default` node
@@ -490,6 +517,25 @@ specified when `enableCopyOnReadSupport` is enabled
 debug
 : Boolean value. Defaults to `false`
 : If enabled then Lucene logging would be integrated with Slf4j
+
+### Tika Config (1.0.12)
+
+Oak Lucene uses [Apache Tika][tika] to extract the text from binary content
+
+    + tika
+        - maxExtractLength (long) = -10
+        + config.xml  (nt:file)
+          + jcr:content
+            - jcr:data = //config xml binary content
+
+Oak uses a [default config][default-config]. To use a custom config specify
+the config file via `tika/config.xml` node in index config. 
+
+[maxExtractLength][OAK-2470]
+: Limits the number of characters that are extracted by the Tika parse. A negative
+  value indicates a multiple of `maxFieldLength` and a positive value is used as is
+    * maxExtractLength = -10, maxFieldLength = 10000 -> Actual value = 100000
+    * maxExtractLength = 1000 -> Actual value = 1000
 
 <a name="non-root-index"></a>
 ### Non Root Index Definitions
@@ -624,18 +670,48 @@ From the Luke UI shown you can access various details.
 Following are some best practices to get good performance from Lucene based 
 indexes
 
-1. Make use on [non root indexes](#non-root-index). If you query always 
-  perform search under certain paths then create index definition under those 
-  paths only. This might be helpful in multi tenant deployment where each tenant 
-  data is stored under specific repository path and all queries are made under 
-  those path.
-   
-2. Index only required data. Depending on your requirement you can create 
-   multiple Lucene indexes. For example if in majority of cases you are 
-   querying on various properties specified under `<node>/jcr:content/metadata`
-   where node belong to certain specific nodeType then create single index 
-   definition listing all such properties and restrict it that nodeType. You 
-   can the size of index via mbean
+1.  **[Non root indexes](#non-root-index)** - If your query always
+    perform search under certain paths then create index definition under those
+    paths only. This might be helpful in multi tenant deployment where each tenant
+    data is stored under specific repository path and all queries are made under
+    those path.
+
+2.  **NodeType based indexing** - Depending on your requirement you can create
+    multiple Lucene indexes. For example if in majority of cases you are
+    querying on various properties specified under `<node>/jcr:content/metadata`
+    where node belong to certain specific nodeType then create single index
+    definition listing all such properties and restrict it that nodeType.
+
+    In fact its recommended to use single index if all the properties being indexed
+    are related. This would enable Lucene index to evaluate as much property
+    restriction as possible  natively (which is faster) and also save on storage
+    cost incurred in storing the node path.
+
+3.  Use features when required - There are certain features provided by Lucene
+    index  which incur extra cost in terms of storage space when enabled. For
+    example enabling `evaluatePathRestrictions`, `ordering` etc. Enable such
+    option only when you make use of those features and further enable them for
+    only those properties. So `ordering`  should be enabled only when sorting is
+    being performed for those properties and `evaluatePathRestrictions` should
+    only be enabled if you are going to specify path restrictions.
+
+### Lucene Index vs Property Index
+
+Lucene based index can be restricted to index only specific properties and in that
+case it is similar to [Property Index](query.html#property-index). However it differs
+from property index in following aspects
+
+1.  Lucene index is Asynchronous - Lucene indexing is done asynchronously with a default
+    interval of 5 secs. If there are lots of writes and those writes are related to what
+    is being indexed then it might cause further delay. Compared to this the property index
+    are always synchronous and upto date.
+
+    So if in your usecase you need the latest result then prefer _Property Indexes_ over
+    _Lucene Index_
+
+2.  Lucene index cannot enforce uniqueness constraint - By virtue of it being asynchronous
+    it cannot enforce uniqueness constraint.
+
 
 [1]: http://www.day.com/specs/jsr170/javadocs/jcr-2.0/constant-values.html#javax.jcr.PropertyType.TYPENAME_STRING
 [OAK-2201]: https://issues.apache.org/jira/browse/OAK-2201
@@ -645,7 +721,13 @@ indexes
 [OAK-1737]: https://issues.apache.org/jira/browse/OAK-1737 
 [OAK-2306]: https://issues.apache.org/jira/browse/OAK-2306
 [OAK-2268]: https://issues.apache.org/jira/browse/OAK-2268
+[OAK-2517]: https://issues.apache.org/jira/browse/OAK-2517
+[OAK-2469]: https://issues.apache.org/jira/browse/OAK-2469
+[OAK-2470]: https://issues.apache.org/jira/browse/OAK-2470
+[OAK-2463]: https://issues.apache.org/jira/browse/OAK-2463
 [luke]: https://code.google.com/p/luke/
+[tika]: http://tika.apache.org/
 [oak-console]: https://github.com/apache/jackrabbit-oak/tree/trunk/oak-run#console
 [JCR-2989]: https://issues.apache.org/jira/browse/JCR-2989?focusedCommentId=13051101
 [solr-analyzer]: https://wiki.apache.org/solr/AnalyzersTokenizersTokenFilters#Specifying_an_Analyzer_in_the_schema
+[default-config]: https://github.com/apache/jackrabbit-oak/blob/trunk/oak-lucene/src/main/resources/org/apache/jackrabbit/oak/plugins/index/lucene/tika-config.xml

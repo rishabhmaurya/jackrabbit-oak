@@ -23,19 +23,28 @@ import static org.apache.lucene.store.NoLockFactory.getNoLockFactory;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
+import java.net.URL;
 import java.util.Calendar;
+import java.util.Set;
 
+import org.apache.commons.io.IOUtils;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
+import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.plugins.index.IndexUpdateCallback;
+import org.apache.jackrabbit.oak.plugins.index.lucene.util.SuggestHelper;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.util.ISO8601;
+import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.SerialMergeScheduler;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSDirectory;
+import org.apache.tika.config.TikaConfig;
+import org.apache.tika.mime.MediaType;
 import org.apache.tika.parser.AutoDetectParser;
 import org.apache.tika.parser.Parser;
 import org.slf4j.Logger;
@@ -89,7 +98,7 @@ public class LuceneIndexEditorContext {
 
     private final IndexWriterConfig config;
 
-    private static final Parser parser = new AutoDetectParser();
+    private static final Parser defaultParser = createDefaultParser();
 
     private final IndexDefinition definition;
 
@@ -103,19 +112,28 @@ public class LuceneIndexEditorContext {
 
     private boolean reindex;
 
+    private Parser parser;
+
+    /**
+     * The media types supported by the parser used.
+     */
+    private Set<MediaType> supportedMediaTypes;
+
     LuceneIndexEditorContext(NodeState root, NodeBuilder definition, IndexUpdateCallback updateCallback) {
         this.definitionBuilder = definition;
         this.definition = new IndexDefinition(root, definition);
         this.config = getIndexWriterConfig(this.definition);
         this.indexedNodes = 0;
         this.updateCallback = updateCallback;
-
         if (this.definition.isOfOldFormat()){
             IndexDefinition.updateDefinition(definition);
         }
     }
 
     Parser getParser() {
+        if (parser == null){
+            parser = initializeTikaParser(definition);
+        }
         return parser;
     }
 
@@ -139,6 +157,9 @@ public class LuceneIndexEditorContext {
         }
 
         if (writer != null) {
+
+            updateSuggester();
+
             writer.close();
 
             //OAK-2029 Record the last updated status so
@@ -147,6 +168,36 @@ public class LuceneIndexEditorContext {
             NodeBuilder status = definitionBuilder.child(":status");
             status.setProperty("lastUpdated", ISO8601.format(Calendar.getInstance()), Type.DATE);
             status.setProperty("indexedNodes",indexedNodes);
+        }
+    }
+
+    private void updateSuggester() throws IOException {
+
+        // eventually update suggest dictionary
+        boolean updateSuggester = false;
+        NodeBuilder suggesterStatus = definitionBuilder.child(":suggesterStatus");
+        if (suggesterStatus.hasProperty("lastUpdated")) {
+            PropertyState suggesterLastUpdatedValue = suggesterStatus.getProperty("lastUpdated");
+            Calendar suggesterLastUpdatedTime = ISO8601.parse(suggesterLastUpdatedValue.getValue(Type.DATE));
+            int updateFrequency = definition.getSuggesterUpdateFrequencyMinutes();
+            suggesterLastUpdatedTime.add(Calendar.MINUTE, updateFrequency);
+            if (Calendar.getInstance().after(suggesterLastUpdatedTime)) {
+                updateSuggester = true;
+            }
+        } else {
+            updateSuggester = true;
+        }
+
+        if (updateSuggester) {
+            DirectoryReader reader = DirectoryReader.open(writer, false);
+            try {
+                SuggestHelper.updateSuggester(reader);
+                suggesterStatus.setProperty("lastUpdated", ISO8601.format(Calendar.getInstance()), Type.DATE);
+            } catch (Throwable e) {
+                log.warn("could not update suggester", e);
+            } finally {
+                reader.close();
+            }
         }
     }
 
@@ -165,11 +216,59 @@ public class LuceneIndexEditorContext {
         return indexedNodes;
     }
 
+    public boolean isSupportedMediaType(String type) {
+        if (supportedMediaTypes == null) {
+            supportedMediaTypes = getParser().getSupportedTypes(null);
+        }
+        return supportedMediaTypes.contains(MediaType.parse(type));
+    }
+
     void indexUpdate() throws CommitFailedException {
         updateCallback.indexUpdate();
     }
 
     public IndexDefinition getDefinition() {
         return definition;
+    }
+
+    private static Parser initializeTikaParser(IndexDefinition definition) {
+        if (definition.hasCustomTikaConfig()){
+            InputStream is = definition.getTikaConfig();
+            try {
+                return new AutoDetectParser(getTikaConfig(is, definition));
+            } finally {
+                IOUtils.closeQuietly(is);
+            }
+        }
+        return defaultParser;
+    }
+
+    private static AutoDetectParser createDefaultParser() {
+        URL configUrl = LuceneIndexEditorContext.class.getResource("tika-config.xml");
+        InputStream is = null;
+        if (configUrl != null) {
+            try {
+                is = configUrl.openStream();
+                TikaConfig config = new TikaConfig(is);
+                log.info("Loaded default Tika Config from classpath {}", configUrl);
+                return new AutoDetectParser(config);
+            } catch (Exception e) {
+                log.warn("Tika configuration not available : " + configUrl, e);
+            } finally {
+                IOUtils.closeQuietly(is);
+            }
+        } else {
+            log.warn("Default Tika configuration not found from {}", configUrl);
+        }
+        return new AutoDetectParser();
+    }
+
+    private static TikaConfig getTikaConfig(InputStream configStream, Object source){
+        try {
+            return new TikaConfig(configStream);
+        } catch (Exception e) {
+            log.warn("Tika configuration not available : "+source, e);
+        }
+        return TikaConfig.getDefaultConfig();
     }
 }

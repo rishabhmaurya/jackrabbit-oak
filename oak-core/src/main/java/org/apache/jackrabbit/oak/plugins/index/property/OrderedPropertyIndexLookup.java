@@ -177,7 +177,7 @@ public class OrderedPropertyIndexLookup {
         if (indexMeta != null) {
             // we relay then on the standard property index for the cost
             cost = COST_OVERHEAD
-                   + getStrategy(indexMeta).count(indexMeta, PropertyIndex.encode(value), MAX_COST);
+                   + getStrategy(indexMeta).count(root, indexMeta, PropertyIndex.encode(value), MAX_COST);
         }
         return cost;
     }
@@ -268,7 +268,7 @@ public class OrderedPropertyIndexLookup {
         if (definition != null) {
             PropertyValue value = null;
             boolean createPlan = false;
-            if (pr.first == null && pr.last == null) {
+            if (pr.isNotNullRestriction()) {
                 // open query: [property] is not null
                 value = null;
                 createPlan = true;

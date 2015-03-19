@@ -98,11 +98,10 @@ public class NodeStoreTest extends OakBaseTest {
     @Test
     public void addExistingNode() throws CommitFailedException {
         // FIXME OAK-1550 Incorrect handling of addExistingNode conflict in NodeStore
-        assumeTrue(fixture != NodeStoreFixture.MONGO_MK);
         assumeTrue(fixture != NodeStoreFixture.MONGO_NS);
 
         CommitHook hook = new CompositeHook(
-                new ConflictHook(JcrConflictHandler.JCR_CONFLICT_HANDLER),
+                new ConflictHook(JcrConflictHandler.createJcrConflictHandler()),
                 new EditorHook(new ConflictValidatorProvider())
         );
 

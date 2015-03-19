@@ -17,6 +17,8 @@
 package org.apache.jackrabbit.oak.plugins.index.solr.query;
 
 import java.util.Collection;
+import java.util.List;
+import javax.jcr.PropertyType;
 
 import org.apache.jackrabbit.oak.plugins.index.solr.configuration.OakSolrConfiguration;
 import org.apache.jackrabbit.oak.query.fulltext.FullTextAnd;
@@ -26,6 +28,7 @@ import org.apache.jackrabbit.oak.query.fulltext.FullTextOr;
 import org.apache.jackrabbit.oak.query.fulltext.FullTextTerm;
 import org.apache.jackrabbit.oak.query.fulltext.FullTextVisitor;
 import org.apache.jackrabbit.oak.spi.query.Filter;
+import org.apache.jackrabbit.oak.spi.query.QueryIndex;
 import org.apache.solr.client.solrj.SolrQuery;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,7 +43,7 @@ class FilterQueryParser {
 
     private static final Logger log = LoggerFactory.getLogger(FilterQueryParser.class);
 
-    static SolrQuery getQuery(Filter filter, OakSolrConfiguration configuration) {
+    static SolrQuery getQuery(Filter filter, List<QueryIndex.OrderEntry> sortOrder, OakSolrConfiguration configuration) {
 
         SolrQuery solrQuery = new SolrQuery();
         setDefaults(solrQuery, configuration);
@@ -58,9 +61,31 @@ class FilterQueryParser {
             }
         }
 
+        if (sortOrder != null) {
+            for (QueryIndex.OrderEntry orderEntry : sortOrder) {
+                SolrQuery.ORDER order;
+                if (QueryIndex.OrderEntry.Order.ASCENDING.equals(orderEntry.getOrder())) {
+                    order = SolrQuery.ORDER.asc;
+                } else {
+                    order = SolrQuery.ORDER.desc;
+                }
+                String sortingField;
+                if ("jcr:path".equals(orderEntry.getPropertyName())) {
+                    sortingField = configuration.getPathField();
+                } else {
+                    sortingField = getSortingField(orderEntry.getPropertyType().tag(), orderEntry.getPropertyName());
+                }
+                solrQuery.addOrUpdateSort(partialEscape(sortingField).toString(), order);
+            }
+        }
+
         Collection<Filter.PropertyRestriction> propertyRestrictions = filter.getPropertyRestrictions();
         if (propertyRestrictions != null && !propertyRestrictions.isEmpty()) {
             for (Filter.PropertyRestriction pr : propertyRestrictions) {
+                if (pr.isNullRestriction()) {
+                    // can not use full "x is null"
+                    continue;
+                }
                 // native query support
                 if (SolrQueryIndex.NATIVE_SOLR_QUERY.equals(pr.propertyName) || SolrQueryIndex.NATIVE_LUCENE_QUERY.equals(pr.propertyName)) {
                     String nativeQueryString = String.valueOf(pr.first.getValue(pr.first.getType()));
@@ -79,21 +104,41 @@ class FilterQueryParser {
                             if (kv.length != 2) {
                                 throw new RuntimeException("Unparsable native HTTP Solr query");
                             } else {
-                                if ("stream.body".equals(kv[0])) {
-                                    kv[0] = "q";
-                                    String mltFlString = "mlt.fl=";
-                                    int mltFlIndex = parameterString.indexOf(mltFlString);
-                                    if (mltFlIndex > -1) {
-                                        int beginIndex = mltFlIndex + mltFlString.length();
-                                        int endIndex = parameterString.indexOf('&', beginIndex);
-                                        String fields;
-                                        if (endIndex > beginIndex) {
-                                            fields = parameterString.substring(beginIndex, endIndex);
-                                        } else {
-                                            fields = parameterString.substring(beginIndex);
+                                // more like this
+                                if ("/mlt".equals(requestHandlerString)) {
+                                    if ("stream.body".equals(kv[0])) {
+                                        kv[0] = "q";
+                                        String mltFlString = "mlt.fl=";
+                                        int mltFlIndex = parameterString.indexOf(mltFlString);
+                                        if (mltFlIndex > -1) {
+                                            int beginIndex = mltFlIndex + mltFlString.length();
+                                            int endIndex = parameterString.indexOf('&', beginIndex);
+                                            String fields;
+                                            if (endIndex > beginIndex) {
+                                                fields = parameterString.substring(beginIndex, endIndex);
+                                            } else {
+                                                fields = parameterString.substring(beginIndex);
+                                            }
+                                            kv[1] = "_query_:\"{!dismax qf=" + fields + " q.op=OR}" + kv[1] + "\"";
                                         }
-                                        kv[1] = "_query_:\"{!dismax qf=" + fields + " q.op=OR}" + kv[1] + "\"";
                                     }
+                                    if ("mlt.fl".equals(kv[0]) && ":path".equals(kv[1])) {
+                                        // rep:similar passes the path of the node to find similar documents for in the :path
+                                        // but needs its indexed content to find similar documents
+                                        kv[1] = configuration.getCatchAllField();
+                                    }
+                                }
+                                if ("/spellcheck".equals(requestHandlerString)) {
+                                    if ("term".equals(kv[0])) {
+                                        kv[0] = "spellcheck.q";
+                                    }
+                                    solrQuery.setParam("spellcheck", true);
+                                }
+                                if ("/suggest".equals(requestHandlerString)) {
+                                    if ("term".equals(kv[0])) {
+                                        kv[0] = "suggest.q";
+                                    }
+                                    solrQuery.setParam("suggest", true);
                                 }
                                 solrQuery.setParam(kv[0], kv[1]);
                             }
@@ -103,11 +148,7 @@ class FilterQueryParser {
                         queryBuilder.append(nativeQueryString);
                     }
                 } else {
-                    if (!configuration.useForPropertyRestrictions() // Solr index not used for properties
-                            || pr.propertyName.contains("/") // no child-level property restrictions
-                            || "rep:excerpt".equals(pr.propertyName) // rep:excerpt is handled by the query engine
-                            || configuration.getIgnoredProperties().contains(pr.propertyName) // property is explicitly ignored
-                            ) {
+                    if (SolrQueryIndex.isIgnoredProperty(pr.propertyName, configuration)) {
                         continue;
                     }
 
@@ -196,6 +237,21 @@ class FilterQueryParser {
         }
 
         return solrQuery;
+    }
+
+    private static String getSortingField(int tag, String s) {
+//        switch (tag) {
+//            case PropertyType.LONG:
+//                return s+"_long_sort";
+//            case PropertyType.DATE:
+//                return s+"_date_sort";
+//            case PropertyType.DOUBLE:
+//                return s+"_double_sort";
+//            case PropertyType.STRING:
+//                return s+"_string_sort";
+//            default:
+                return s+"_string_sort";
+//        }
     }
 
     private static CharSequence partialEscape(CharSequence s) {
@@ -290,7 +346,7 @@ class FilterQueryParser {
 
     private static boolean isSupportedHttpRequest(String nativeQueryString) {
         // the query string starts with ${supported-handler.selector}?
-        return nativeQueryString.matches("(mlt|query|select|get)\\\\?.*");
+        return nativeQueryString.matches("(suggest|spellcheck|mlt|query|select|get)\\\\?.*");
     }
 
     private static void setDefaults(SolrQuery solrQuery, OakSolrConfiguration configuration) {
