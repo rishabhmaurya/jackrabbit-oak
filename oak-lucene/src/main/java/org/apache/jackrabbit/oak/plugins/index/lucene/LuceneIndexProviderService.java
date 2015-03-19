@@ -39,7 +39,6 @@ import org.apache.felix.scr.annotations.ReferencePolicyOption;
 import org.apache.jackrabbit.oak.commons.PropertiesUtil;
 import org.apache.jackrabbit.oak.osgi.OsgiWhiteboard;
 import org.apache.jackrabbit.oak.plugins.index.aggregate.NodeAggregator;
-import org.apache.jackrabbit.oak.plugins.index.lucene.score.ScorerProviderFactory;
 import org.apache.jackrabbit.oak.spi.commit.Observer;
 import org.apache.jackrabbit.oak.spi.query.QueryIndexProvider;
 import org.apache.jackrabbit.oak.spi.whiteboard.Registration;
@@ -100,16 +99,13 @@ public class LuceneIndexProviderService {
 
     private WhiteboardExecutor executor;
 
-    @Reference
-    ScorerProviderFactory scorerFactory;
-
     @Activate
     private void activate(BundleContext bundleContext, Map<String, ?> config)
             throws NotCompliantMBeanException {
         initializeFactoryClassLoaders(getClass().getClassLoader());
         whiteboard = new OsgiWhiteboard(bundleContext);
 
-        indexProvider = new LuceneIndexProvider(createTracker(bundleContext, config), scorerFactory);
+        indexProvider = new LuceneIndexProvider(createTracker(bundleContext, config));
         initializeLogging(config);
         initialize();
 

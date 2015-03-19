@@ -168,8 +168,6 @@ class IndexDefinition implements Aggregate.AggregateMapper{
 
     private final Analyzer analyzer;
 
-    private final String scorerProviderName;
-
     private final Map<String, Analyzer> analyzers;
 
     public IndexDefinition(NodeState root, NodeState defn) {
@@ -227,7 +225,6 @@ class IndexDefinition implements Aggregate.AggregateMapper{
         this.indexesAllTypes = areAllTypesIndexed();
         this.analyzers = collectAnalyzers(defn);
         this.analyzer = createAnalyzer();
-        this.scorerProviderName = getOptionalValue(defn, LuceneIndexConstants.PROP_SCORER_PROVIDER, null);
     }
 
     public boolean isFullTextEnabled() {
@@ -306,10 +303,6 @@ class IndexDefinition implements Aggregate.AggregateMapper{
 
     public Analyzer getAnalyzer(){
         return analyzer;
-    }
-
-    public String getScorerProviderName(){
-        return scorerProviderName;
     }
 
     @Override

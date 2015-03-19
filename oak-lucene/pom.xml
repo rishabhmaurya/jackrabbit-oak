@@ -102,13 +102,9 @@
           <instructions>
             <!-- TODO: Should only provide services, not export packages  -->
             <Export-Package>
-                org.apache.jackrabbit.oak.plugins.index.lucene,
-                org.apache.jackrabbit.oak.plugins.index.lucene.util,
-                org.apache.jackrabbit.oak.plugins.index.lucene.score,
+              org.apache.jackrabbit.oak.plugins.index.lucene,
+              org.apache.jackrabbit.oak.plugins.index.lucene.util
             </Export-Package>
-            <_exportcontents>
-                org.apache.lucene.*;version=${lucene.version}
-            </_exportcontents>
             <Import-Package>
                 org.apache.lucene.sandbox.*;resolution:=optional,
                 *

@@ -130,8 +130,6 @@ public interface LuceneIndexConstants {
 
     String PROP_ORDERED = "ordered";
 
-    String PROP_SCORER_PROVIDER = "scorerProviderName";
-
     /**
      * Integer property indicating that LuceneIndex should be
      * used in compat mode to specific version
