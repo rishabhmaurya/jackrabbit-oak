@@ -49,8 +49,6 @@ import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import javax.sql.DataSource;
 
-import com.google.common.collect.ImmutableMap;
-
 import org.apache.jackrabbit.oak.cache.CacheStats;
 import org.apache.jackrabbit.oak.cache.CacheValue;
 import org.apache.jackrabbit.oak.plugins.document.Collection;
@@ -73,6 +71,7 @@ import org.slf4j.LoggerFactory;
 
 import com.google.common.base.Objects;
 import com.google.common.cache.Cache;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.util.concurrent.Striped;
 
@@ -314,25 +313,22 @@ public class RDBDocumentStore implements DocumentStore {
                 Connection con = null;
                 try {
                     con = this.ch.getRWConnection();
+                    Statement stmt = null;
                     try {
-                        Statement stmt = con.createStatement();
+                        stmt = con.createStatement();
                         stmt.execute("drop table " + tname);
                         stmt.close();
                         con.commit();
                         dropped += tname + " ";
                     } catch (SQLException ex) {
-                        LOG.debug("attempting to drop: " + tname);
+                        LOG.debug("attempting to drop: " + tname, ex);
+                    } finally {
+                        this.ch.closeStatement(stmt);
                     }
                 } catch (SQLException ex) {
-                    LOG.debug("attempting to drop: " + tname);
+                    LOG.debug("attempting to drop: " + tname, ex);
                 } finally {
-                    try {
-                        if (con != null) {
-                            con.close();
-                        }
-                    } catch (SQLException ex) {
-                        LOG.debug("on close ", ex);
-                    }
+                    this.ch.closeConnection(con);
                 }
             }
             this.droppedTables = dropped.trim();
@@ -619,8 +615,10 @@ public class RDBDocumentStore implements DocumentStore {
     private RDBConnectionHandler ch;
 
     // from options
-    private String tablePrefix = "";
     private Set<String> tablesToBeDropped = new HashSet<String>();
+
+    // table names
+    private String tnNodes, tnClusterNodes, tnSettings; 
 
     // ratio between Java characters and UTF-8 encoding
     // a) single characters will fit into 3 bytes
@@ -654,10 +652,9 @@ public class RDBDocumentStore implements DocumentStore {
 
     private void initialize(DataSource ds, DocumentMK.Builder builder, RDBOptions options) throws Exception {
 
-        this.tablePrefix = options.getTablePrefix();
-        if (tablePrefix.length() > 0 && !tablePrefix.endsWith("_")) {
-            tablePrefix += "_";
-        }
+        this.tnNodes = RDBJDBCTools.createTableName(options.getTablePrefix(), "NODES");
+        this.tnClusterNodes = RDBJDBCTools.createTableName(options.getTablePrefix(), "CLUSTERNODES");
+        this.tnSettings = RDBJDBCTools.createTableName(options.getTablePrefix(), "SETTINGS");
 
         this.ch = new RDBConnectionHandler(ds);
         this.callStack = LOG.isDebugEnabled() ? new Exception("call stack of RDBDocumentStore creation") : null;
@@ -680,54 +677,77 @@ public class RDBDocumentStore implements DocumentStore {
         db.checkVersion(md);
 
         if (! "".equals(db.getInitializationStatement())) {
-            Statement stmt = con.createStatement();
-            stmt.execute(db.getInitializationStatement());
-            stmt.close();
-            con.commit();
+            Statement stmt = null;
+            try {
+                stmt = con.createStatement();
+                stmt.execute(db.getInitializationStatement());
+                stmt.close();
+                con.commit();
+            }
+            finally {
+                this.ch.closeStatement(stmt);
+            }
         }
 
+        List<String> tablesCreated = new ArrayList<String>();
+        List<String> tablesPresent = new ArrayList<String>();
         try {
-            createTableFor(con, Collection.CLUSTER_NODES, options.isDropTablesOnClose());
-            createTableFor(con, Collection.NODES, options.isDropTablesOnClose());
-            createTableFor(con, Collection.SETTINGS, options.isDropTablesOnClose());
+            createTableFor(con, Collection.CLUSTER_NODES, tablesCreated, tablesPresent);
+            createTableFor(con, Collection.NODES, tablesCreated, tablesPresent);
+            createTableFor(con, Collection.SETTINGS, tablesCreated, tablesPresent);
         } finally {
             con.commit();
             con.close();
         }
 
-        LOG.info("RDBDocumentStore instantiated for database " + dbDesc + ", using driver: " + driverDesc + ", connecting to: " + dbUrl);
+        if (options.isDropTablesOnClose()) {
+            tablesToBeDropped.addAll(tablesCreated);
+        }
+
+        LOG.info("RDBDocumentStore instantiated for database " + dbDesc + ", using driver: " + driverDesc + ", connecting to: "
+                + dbUrl);
+        if (!tablesPresent.isEmpty()) {
+            LOG.info("Tables present upon startup: " + tablesPresent);
+        }
+        if (!tablesCreated.isEmpty()) {
+            LOG.info("Tables created upon startup: " + tablesCreated
+                    + (options.isDropTablesOnClose() ? " (will be dropped on exit)" : ""));
+        }
     }
 
-    private void createTableFor(Connection con, Collection<? extends Document> col, boolean dropTablesOnClose) throws SQLException {
+    private void createTableFor(Connection con, Collection<? extends Document> col, List<String> tablesCreated, List<String> tablesPresent) throws SQLException {
         String dbname = this.db.toString();
         if (con.getMetaData().getURL() != null) {
             dbname += " (" + con.getMetaData().getURL() + ")";
         }
         String tableName = getTable(col);
+
+        PreparedStatement checkStatement = null;
+        ResultSet checkResultSet = null;
+        Statement creatStatement = null;
         try {
-            PreparedStatement stmt = con.prepareStatement("select DATA from " + tableName + " where ID = ?");
-            stmt.setString(1, "0:/");
-            ResultSet rs = stmt.executeQuery();
+            checkStatement = con.prepareStatement("select DATA from " + tableName + " where ID = ?");
+            checkStatement.setString(1, "0:/");
+            checkResultSet = checkStatement.executeQuery();
 
             if (col.equals(Collection.NODES)) {
                 // try to discover size of DATA column
-                ResultSetMetaData met = rs.getMetaData();
+                ResultSetMetaData met = checkResultSet.getMetaData();
                 this.dataLimitInOctets = met.getPrecision(1);
             }
-
-            LOG.info("Table " + tableName + " already present in " + dbname);
+            tablesPresent.add(tableName);
         } catch (SQLException ex) {
             // table does not appear to exist
             con.rollback();
 
             try {
-                Statement stmt = con.createStatement();
-                stmt.execute(this.db.getTableCreationStatement(tableName));
-                stmt.close();
+                creatStatement = con.createStatement();
+                creatStatement.execute(this.db.getTableCreationStatement(tableName));
+                creatStatement.close();
 
                 con.commit();
 
-                LOG.info("Created table " + tableName + " in " + dbname);
+                tablesCreated.add(tableName);
 
                 if (col.equals(Collection.NODES)) {
                     PreparedStatement pstmt = con.prepareStatement("select DATA from " + tableName + " where ID = ?");
@@ -736,20 +756,21 @@ public class RDBDocumentStore implements DocumentStore {
                     ResultSetMetaData met = rs.getMetaData();
                     this.dataLimitInOctets = met.getPrecision(1);
                 }
-
-                if (dropTablesOnClose) {
-                    tablesToBeDropped.add(tableName);
-                }
             }
             catch (SQLException ex2) {
                 LOG.error("Failed to create table " + tableName + " in " + dbname, ex2);
                 throw ex2;
             }
         }
+        finally {
+            this.ch.closeResultSet(checkResultSet);
+            this.ch.closeStatement(checkStatement);
+            this.ch.closeStatement(creatStatement);
+        }
     }
 
     @Override
-    public void finalize() {
+    protected void finalize() {
         if (this.ch != null && this.callStack != null) {
             LOG.debug("finalizing RDBDocumentStore that was not disposed", this.callStack);
         }
@@ -886,7 +907,13 @@ public class RDBDocumentStore implements DocumentStore {
                 return internalUpdate(collection, update, oldDoc, checkConditions, RETRIES);
             }
         } else {
-            return internalUpdate(collection, update, oldDoc, checkConditions, RETRIES);
+            T result = internalUpdate(collection, update, oldDoc, checkConditions, RETRIES);
+            if (allowCreate && result == null) {
+                // TODO OAK-2655 need to implement some kind of retry
+                LOG.error("update of " + update.getId() + " failed, race condition?");
+                throw new DocumentStoreException("update of " + update.getId() + " failed, race condition?");
+            }
+            return result;
         }
     }
 
@@ -923,7 +950,7 @@ public class RDBDocumentStore implements DocumentStore {
 
                         if (oldDoc == null) {
                             // document was there but is now gone
-                            LOG.error("failed to apply update because document is gone in the meantime: " + update.getId());
+                            LOG.debug("failed to apply update because document is gone in the meantime: " + update.getId(), new Exception("call stack"));
                             return null;
                         }
 
@@ -998,7 +1025,7 @@ public class RDBDocumentStore implements DocumentStore {
                 }
                 if (success) {
                     for (Entry<String, NodeDocument> entry : cachedDocs.entrySet()) {
-                        T oldDoc = (T) (entry.getValue());
+                        T oldDoc = castAsT(entry.getValue());
                         if (oldDoc == null) {
                             // make sure concurrently loaded document is
                             // invalidated
@@ -1058,11 +1085,11 @@ public class RDBDocumentStore implements DocumentStore {
 
     private <T extends Document> String getTable(Collection<T> collection) {
         if (collection == Collection.CLUSTER_NODES) {
-            return this.tablePrefix + "CLUSTERNODES";
+            return this.tnClusterNodes;
         } else if (collection == Collection.NODES) {
-            return this.tablePrefix + "NODES";
+            return this.tnNodes;
         } else if (collection == Collection.SETTINGS) {
-            return this.tablePrefix + "SETTINGS";
+            return this.tnSettings;
         } else {
             throw new IllegalArgumentException("Unknown collection: " + collection.toString());
         }
@@ -1086,7 +1113,7 @@ public class RDBDocumentStore implements DocumentStore {
                 if (lastmodcount == row.getModcount()) {
                     // we can re-use the cached document
                     cachedDoc.markUpToDate(System.currentTimeMillis());
-                    return (T) cachedDoc;
+                    return castAsT(cachedDoc);
                 } else {
                     return SR.fromRow(collection, row);
                 }
@@ -1457,7 +1484,7 @@ public class RDBDocumentStore implements DocumentStore {
             stmt.setObject(si++, hasBinary ? 1 : 0, Types.SMALLINT);
             stmt.setObject(si++, deletedOnce ? 1 : 0, Types.SMALLINT);
             stmt.setObject(si++, modcount, Types.BIGINT);
-            stmt.setObject(si++, cmodcount == null ? 0 : cmodcount, Types.BIGINT);
+            stmt.setObject(si++, cmodcount == null ? Long.valueOf(0) : cmodcount, Types.BIGINT);
             stmt.setObject(si++, data.length(), Types.BIGINT);
 
             if (data.length() < this.dataLimitInOctets / CHAR2OCTETRATIO) {
@@ -1501,7 +1528,7 @@ public class RDBDocumentStore implements DocumentStore {
             stmt.setObject(si++, hasBinary ? 1 : 0, Types.SMALLINT);
             stmt.setObject(si++, deletedOnce ? 1 : 0, Types.SMALLINT);
             stmt.setObject(si++, modcount, Types.BIGINT);
-            stmt.setObject(si++, cmodcount == null ? 0 : cmodcount, Types.BIGINT);
+            stmt.setObject(si++, cmodcount == null ? Long.valueOf(0) : cmodcount, Types.BIGINT);
             stmt.setObject(si++, 1 + appendData.length(), Types.BIGINT);
             stmt.setString(si++, "," + appendData);
             setIdInStatement(stmt, si++, id);
@@ -1564,7 +1591,7 @@ public class RDBDocumentStore implements DocumentStore {
             stmt.setObject(si++, hasBinary ? 1 : 0, Types.SMALLINT);
             stmt.setObject(si++, deletedOnce ? 1 : 0, Types.SMALLINT);
             stmt.setObject(si++, modcount, Types.BIGINT);
-            stmt.setObject(si++, cmodcount == null ? 0 : cmodcount, Types.BIGINT);
+            stmt.setObject(si++, cmodcount == null ? Long.valueOf(0) : cmodcount, Types.BIGINT);
             stmt.setObject(si++, data.length(), Types.BIGINT);
             if (data.length() < this.dataLimitInOctets / CHAR2OCTETRATIO) {
                 stmt.setString(si++, data);
@@ -1763,7 +1790,7 @@ public class RDBDocumentStore implements DocumentStore {
             if (modCount.longValue() <= cachedModCount.longValue()) {
                 // we can use the cached document
                 inCache.markUpToDate(now);
-                return (T) inCache;
+                return castAsT(inCache);
             }
         }
 
@@ -1790,7 +1817,7 @@ public class RDBDocumentStore implements DocumentStore {
         } finally {
             lock.unlock();
         }
-        return (T) fresh;
+        return castAsT(fresh);
     }
 
     private boolean hasChangesToCollisions(UpdateOp update) {

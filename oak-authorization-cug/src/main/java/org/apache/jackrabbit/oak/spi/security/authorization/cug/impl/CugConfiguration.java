@@ -108,29 +108,33 @@ public class CugConfiguration extends ConfigurationBase implements Authorization
         super(securityProvider, securityProvider.getParameters(NAME));
     }
 
+    @Nonnull
     @Override
-    public AccessControlManager getAccessControlManager(Root root, NamePathMapper namePathMapper) {
+    public AccessControlManager getAccessControlManager(@Nonnull Root root, @Nonnull NamePathMapper namePathMapper) {
         return new CugAccessControlManager(root, namePathMapper, getSecurityProvider());
     }
 
+    @Nonnull
     @Override
     public RestrictionProvider getRestrictionProvider() {
         return RestrictionProvider.EMPTY;
     }
 
+    @Nonnull
     @Override
-    public PermissionProvider getPermissionProvider(Root root, String workspaceName, Set<Principal> principals) {
+    public PermissionProvider getPermissionProvider(@Nonnull Root root, @Nonnull String workspaceName, @Nonnull Set<Principal> principals) {
         ConfigurationParameters params = getParameters();
         boolean enabled = params.getConfigValue(CugConstants.PARAM_CUG_ENABLED, false);
 
-        String[] supportedPaths = params.getConfigValue(CugConstants.PARAM_CUG_SUPPORTED_PATHS, new String[0]);
-        if (!enabled || supportedPaths.length == 0 || getExclude().isExcluded(principals)) {
+        Set<String> supportedPaths = params.getConfigValue(CugConstants.PARAM_CUG_SUPPORTED_PATHS, Collections.<String>emptySet());
+        if (!enabled || supportedPaths.isEmpty() || getExclude().isExcluded(principals)) {
             return EmptyPermissionProvider.getInstance();
         } else {
             return new CugPermissionProvider(root, principals, supportedPaths, getContext());
         }
     }
 
+    @Nonnull
     @Override
     public String getName() {
         return AuthorizationConfiguration.NAME;
@@ -141,7 +145,7 @@ public class CugConfiguration extends ConfigurationBase implements Authorization
     public RepositoryInitializer getRepositoryInitializer() {
         return new RepositoryInitializer() {
             @Override
-            public void initialize(NodeBuilder builder) {
+            public void initialize(@Nonnull NodeBuilder builder) {
                 NodeState base = builder.getNodeState();
                 NodeStore store = new MemoryNodeStore(base);
 
@@ -158,15 +162,17 @@ public class CugConfiguration extends ConfigurationBase implements Authorization
 
     @Nonnull
     @Override
-    public List<? extends ValidatorProvider> getValidators(String workspaceName, Set<Principal> principals, MoveTracker moveTracker) {
+    public List<? extends ValidatorProvider> getValidators(@Nonnull String workspaceName, @Nonnull Set<Principal> principals, @Nonnull MoveTracker moveTracker) {
         return ImmutableList.of(new CugValidatorProvider());
     }
 
+    @Nonnull
     @Override
     public List<ProtectedItemImporter> getProtectedItemImporters() {
         return Collections.<ProtectedItemImporter>singletonList(new CugImporter());
     }
 
+    @Nonnull
     @Override
     public Context getContext() {
         return CugContext.INSTANCE;

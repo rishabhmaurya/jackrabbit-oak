@@ -1,4 +1,3 @@
-<html>
 <!--
    Licensed to the Apache Software Foundation (ASF) under one or more
    contributor license agreements.  See the NOTICE file distributed with
@@ -15,25 +14,10 @@
    See the License for the specific language governing permissions and
    limitations under the License.
   -->
-<head>
-<title>&micro;Kernel prototype: getHeadRevision</title>
-<meta http-equiv="content-type" content="text/html; charset=utf-8"></meta>
-<link rel="stylesheet" type="text/css" href="main.css"></link>
-</head>
 
-<body>
-    <script src="header.js"></script>
-    <div class="content">
-        <h1>Revision Operations: getHeadRevision</h1>
-        <form method="POST" target="result">
-            <table class="formtable">
-            <tr><td>&nbsp;</td><td>
-            <input type="submit"><br></td></tr></table>
-        </form>
-        <p>
-            <iframe name="result" height="400" width="950" src="about:blank"></iframe>
-        </p>
-        <script src="footer.js"></script>
-    </div>
-</body>
-</html>
+### Supporting software attribution
+
+Developers use various tools to assist with their work, such as 
+[IntelliJ IDEA](http://www.jetbrains.com/idea/opensource/) or 
+[Eclipse](http://www.eclipse.org/). Most tools do not require attribution, but some do 
+([YourKit Java Profiler](http://www.yourkit.com/)).

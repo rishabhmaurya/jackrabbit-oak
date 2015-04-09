@@ -47,6 +47,8 @@ import org.apache.jackrabbit.util.Text;
  * provider implementations. Note, that the implementations *must* implement
  * the {@link org.apache.jackrabbit.oak.spi.security.authorization.permission.AggregatedPermissionProvider}
  * interface.
+ *
+ * TODO This is work in progress (OAK-1268)
  */
 class CompositePermissionProvider implements PermissionProvider {
 
@@ -77,8 +79,9 @@ class CompositePermissionProvider implements PermissionProvider {
         }
     }
 
+    @Nonnull
     @Override
-    public Set<String> getPrivileges(final @Nullable Tree tree) {
+    public Set<String> getPrivileges(@Nullable final Tree tree) {
         PrivilegeBits result = null;
         Iterable<AggregatedPermissionProvider> providers = Iterables.filter(pps, new Predicate<AggregatedPermissionProvider>() {
             @Override
@@ -100,7 +103,7 @@ class CompositePermissionProvider implements PermissionProvider {
     }
 
     @Override
-    public boolean hasPrivileges(final @Nullable Tree tree, @Nonnull String... privilegeNames) {
+    public boolean hasPrivileges(@Nullable final Tree tree, @Nonnull String... privilegeNames) {
         for (final String privName : pbp.getAggregatedPrivilegeNames(privilegeNames)) {
             Iterable<AggregatedPermissionProvider> providers = Iterables.filter(pps, new Predicate<AggregatedPermissionProvider>() {
                 @Override
@@ -117,11 +120,13 @@ class CompositePermissionProvider implements PermissionProvider {
         return true;
     }
 
+    @Nonnull
     @Override
     public RepositoryPermission getRepositoryPermission() {
         return repositoryPermission;
     }
 
+    @Nonnull
     @Override
     public TreePermission getTreePermission(@Nonnull Tree tree, @Nonnull TreePermission parentPermission) {
         ImmutableTree immTree = (tree instanceof ImmutableTree) ? (ImmutableTree) tree : (ImmutableTree) immutableRoot.getTree(tree.getPath());
@@ -136,7 +141,7 @@ class CompositePermissionProvider implements PermissionProvider {
     }
 
     @Override
-    public boolean isGranted(final @Nonnull Tree parent, @Nullable PropertyState property, final long permissions) {
+    public boolean isGranted(@Nonnull final Tree parent, @Nullable PropertyState property, final long permissions) {
         if (Permissions.isAggregate(permissions)) {
             for (final long permission : Permissions.aggregates(permissions)) {
                 Iterable<AggregatedPermissionProvider> providers = Iterables.filter(pps, new Predicate<AggregatedPermissionProvider>() {
@@ -162,7 +167,7 @@ class CompositePermissionProvider implements PermissionProvider {
     }
 
     @Override
-    public boolean isGranted(final @Nonnull String oakPath, @Nonnull String jcrActions) {
+    public boolean isGranted(@Nonnull final String oakPath, @Nonnull String jcrActions) {
         final String[] actions = Text.explode(jcrActions, ',', false);
         switch (actions.length) {
             case 0: return true;
@@ -252,7 +257,7 @@ class CompositePermissionProvider implements PermissionProvider {
             map = ImmutableMap.of();
         }
 
-        private CompositeTreePermission(final @Nonnull ImmutableTree tree, @Nonnull CompositeTreePermission parentPermission) {
+        private CompositeTreePermission(@Nonnull final ImmutableTree tree, @Nonnull CompositeTreePermission parentPermission) {
             this.tree = tree;
             this.parentPermission = parentPermission;
 
@@ -263,8 +268,9 @@ class CompositePermissionProvider implements PermissionProvider {
             }
         }
 
+        @Nonnull
         @Override
-        public TreePermission getChildPermission(String childName, NodeState childState) {
+        public TreePermission getChildPermission(@Nonnull String childName, @Nonnull NodeState childState) {
             ImmutableTree childTree = new ImmutableTree(tree, childName, childState);
             return new CompositeTreePermission(childTree, this);
         }

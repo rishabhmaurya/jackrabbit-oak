@@ -85,7 +85,7 @@
         <configuration>
           <systemPropertyVariables>
             <standby.server.port>${standby.server.port}</standby.server.port>
-            <standby.proxy.port>${standby.poxy.port}</standby.proxy.port>
+            <standby.proxy.port>${standby.proxy.port}</standby.proxy.port>
           </systemPropertyVariables>
           <excludes>
             <!-- excluding long running tests -->
@@ -101,26 +101,22 @@
         <configuration>
           <systemPropertyVariables>
             <standby.server.port>${standby.server.port}</standby.server.port>
-            <standby.proxy.port>${standby.poxy.port}</standby.proxy.port>
+            <standby.proxy.port>${standby.proxy.port}</standby.proxy.port>
           </systemPropertyVariables>
         </configuration>
       </plugin>
+      <plugin>
+        <groupId>org.apache.rat</groupId>
+        <artifactId>apache-rat-plugin</artifactId>
+        <configuration>
+          <excludes>
+            <exclude>**/org.apache.jackrabbit.oak.plugins.segment.standby.store.StandbyStoreService.config</exclude>
+            <exclude>**/org.apache.jackrabbit.oak.plugins.segment.SegmentNodeStoreService.config</exclude>
+            <exclude>**/org.apache.jackrabbit.oak.plugins.segment.standby.store.StandbyStoreService.config</exclude>
+          </excludes>
+        </configuration>
+      </plugin>
     </plugins>
-    <pluginManagement>
-        <plugins>
-            <plugin>
-                <groupId>org.apache.rat</groupId>
-                <artifactId>apache-rat-plugin</artifactId>
-                <configuration>
-                    <excludes>
-                        <exclude>osgi-conf/primary/org.apache.jackrabbit.oak.plugins.segment.standby.store.StandbyStoreService.config</exclude>
-                        <exclude>osgi-conf/standby/org.apache.jackrabbit.oak.plugins.segment.standby.store.StandbyStoreService.config</exclude>
-                        <exclude>osgi-conf/standby/org.apache.jackrabbit.oak.plugins.segment.SegmentNodeStoreService.config</exclude>
-                    </excludes>
-                </configuration>
-            </plugin>
-        </plugins>
-    </pluginManagement>
   </build>
 
   <dependencies>
